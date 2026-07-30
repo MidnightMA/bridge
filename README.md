@@ -29,8 +29,8 @@ A robust Python 3.12 asynchronous application that monitors a **Bale Messenger**
 
 Clone the repository and enter the directory:
 ```bash
-git clone https://github.com/your-username/mirror.git
-cd mirror
+git clone https://github.com/MidnightMA/bridge.git
+cd bridge
 ```
 
 Create and activate a virtual environment:
