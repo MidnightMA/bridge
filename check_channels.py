@@ -24,7 +24,7 @@ async def main() -> None:
     config = Config.load()
 
     dp = Dispatcher()
-    client = Client(dispatcher=dp, phone_number=config.bale_phone)
+    client = Client(dispatcher=dp)
 
     @dp.message()
     async def _on_any_message(message: Message) -> None:
