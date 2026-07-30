@@ -6,6 +6,7 @@ Manages user authentication, persistent sessions, message listening, and media e
 import asyncio
 from dataclasses import dataclass
 from enum import Enum, auto
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -60,11 +61,27 @@ class BaleClient:
         self.target_channel_id = str(target_channel_id)
 
         self.dispatcher = Dispatcher()
-        self.client = Client(
-            session=self.session_name,
-            # phone_number=self.phone_number,
-            dispatcher=self.dispatcher,
-        )
+
+        # Dynamically inspect Client.__init__ signature to map valid parameters
+        sig = inspect.signature(Client.__init__)
+        params = sig.parameters
+
+        client_kwargs = {}
+        if "dispatcher" in params:
+            client_kwargs["dispatcher"] = self.dispatcher
+
+        if "phone_number" in params and self.phone_number:
+            client_kwargs["phone_number"] = self.phone_number
+
+        # Map session file parameter if supported by aiobale Client init
+        for session_param in ("session_name", "session_file", "session_path", "name", "session_id"):
+            if session_param in params:
+                client_kwargs[session_param] = self.session_name
+                break
+
+        # Instantiating Client without passing string to `session`
+        # allows aiobale to create its internal AiohttpSession correctly.
+        self.client = Client(**client_kwargs)
 
         self._message_callback: Optional[MessageHandlerCallback] = None
         self._is_running = False
@@ -73,14 +90,18 @@ class BaleClient:
         """Set async callback for processing normalized messages."""
         self._message_callback = callback
 
-    async def authenticate_and_start() -> None:
+    async def authenticate_and_start(self) -> None:
         """
         Connect to Bale, verify/perform user account authentication, and start watching.
         """
         self._register_event_handlers()
 
         try:
-            await self.client.connect()
+            if hasattr(self.client, "connect") and callable(getattr(self.client, "connect")):
+                await self.client.connect()
+            elif hasattr(self.client, "start") and callable(getattr(self.client, "start")):
+                await self.client.start()
+
             logger.info("Connected to Bale")
 
             is_authorized = await self._check_auth_state()
@@ -94,16 +115,18 @@ class BaleClient:
             logger.error("Authentication or connection error on Bale: %s", e)
             raise
 
-    async def _check_auth_state() -> bool:
+    async def _check_auth_state(self) -> bool:
         """Check if session is currently authorized."""
         try:
-            if hasattr(self.client, "is_user_authorized"):
+            if hasattr(self.client, "is_user_authorized") and callable(getattr(self.client, "is_user_authorized")):
                 return await self.client.is_user_authorized()
-            if hasattr(self.client, "me") and self.client.me:
-                return True
-            if hasattr(self.client, "get_me"):
+            if hasattr(self.client, "is_authorized") and callable(getattr(self.client, "is_authorized")):
+                return await self.client.is_authorized()
+            if hasattr(self.client, "get_me") and callable(getattr(self.client, "get_me")):
                 me = await self.client.get_me()
                 return me is not None
+            if hasattr(self.client, "me") and self.client.me:
+                return True
             return False
         except Exception:
             return False
@@ -113,20 +136,20 @@ class BaleClient:
         print("\n--- Bale User Account Authentication ---")
         phone = self.phone_number or input("Enter Bale Phone Number (+98...): ").strip()
 
-        if hasattr(self.client, "start_phone_auth"):
+        if hasattr(self.client, "start_phone_auth") and callable(getattr(self.client, "start_phone_auth")):
             auth_info = await self.client.start_phone_auth(phone)
             code = input("Enter verification code sent to Bale/SMS: ").strip()
 
-            if hasattr(self.client, "sign_in"):
+            if hasattr(self.client, "sign_in") and callable(getattr(self.client, "sign_in")):
                 await self.client.sign_in(phone=phone, code=code, auth_info=auth_info)
-            elif hasattr(self.client, "complete_phone_auth"):
+            elif hasattr(self.client, "complete_phone_auth") and callable(getattr(self.client, "complete_phone_auth")):
                 await self.client.complete_phone_auth(code=code)
-        elif hasattr(self.client, "auth_cli"):
-            await self.client.auth_cli()
-        else:
+        elif hasattr(self.client, "start") and callable(getattr(self.client, "start")):
             await self.client.start()
+        elif hasattr(self.client, "auth_cli") and callable(getattr(self.client, "auth_cli")):
+            await self.client.auth_cli()
 
-        logger.info("Authentication complete. Session saved to %s", self.session_name)
+        logger.info("Authentication complete. Session saved.")
 
     def _register_event_handlers(self) -> None:
         """Register dispatcher handlers."""
@@ -312,9 +335,11 @@ class BaleClient:
         self._is_running = True
         while self._is_running:
             try:
-                if hasattr(self.client, "run_until_disconnected"):
+                if hasattr(self.client, "run_until_disconnected") and callable(getattr(self.client, "run_until_disconnected")):
                     await self.client.run_until_disconnected()
-                elif hasattr(self.client, "idle"):
+                elif hasattr(self.client, "run") and callable(getattr(self.client, "run")):
+                    await self.client.run()
+                elif hasattr(self.client, "idle") and callable(getattr(self.client, "idle")):
                     await self.client.idle()
                 else:
                     while self._is_running:
@@ -336,11 +361,11 @@ class BaleClient:
         """Stop Bale connection gracefully."""
         self._is_running = False
         try:
-            if hasattr(self.client, "disconnect"):
+            if hasattr(self.client, "disconnect") and callable(getattr(self.client, "disconnect")):
                 await self.client.disconnect()
-            elif hasattr(self.client, "stop"):
+            elif hasattr(self.client, "stop") and callable(getattr(self.client, "stop")):
                 await self.client.stop()
-            elif hasattr(self.client, "close"):
+            elif hasattr(self.client, "close") and callable(getattr(self.client, "close")):
                 await self.client.close()
             logger.info("Bale client stopped.")
         except Exception as e:
