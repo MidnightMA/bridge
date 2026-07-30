@@ -62,7 +62,6 @@ class BaleClient:
 
         self.dispatcher = Dispatcher()
 
-        # Dynamically inspect Client.__init__ signature to map valid parameters
         sig = inspect.signature(Client.__init__)
         params = sig.parameters
 
@@ -73,14 +72,11 @@ class BaleClient:
         if "phone_number" in params and self.phone_number:
             client_kwargs["phone_number"] = self.phone_number
 
-        # Map session file parameter if supported by aiobale Client init
         for session_param in ("session_name", "session_file", "session_path", "name", "session_id"):
             if session_param in params:
                 client_kwargs[session_param] = self.session_name
                 break
 
-        # Instantiating Client without passing string to `session`
-        # allows aiobale to create its internal AiohttpSession correctly.
         self.client = Client(**client_kwargs)
 
         self._message_callback: Optional[MessageHandlerCallback] = None
@@ -91,9 +87,7 @@ class BaleClient:
         self._message_callback = callback
 
     async def authenticate_and_start(self) -> None:
-        """
-        Connect to Bale, verify/perform user account authentication, and start watching.
-        """
+        """Connect to Bale and verify user authentication."""
         self._register_event_handlers()
 
         try:
@@ -161,9 +155,12 @@ class BaleClient:
     async def _process_incoming_message(self, message: Message) -> None:
         """Process raw update from Bale."""
         try:
-            peer_id = self._extract_peer_id(message)
+            peer_id, chat_username = self._extract_peer_info(message)
 
-            if not self._is_target_channel(peer_id):
+            logger.info("Received update from peer_id: %s (Username: @%s)", peer_id, chat_username or "None")
+
+            if not self._is_target_channel(peer_id, chat_username):
+                logger.debug("Ignored update from peer_id %s (Target configured: %s)", peer_id, self.target_channel_id)
                 return
 
             normalized = await self._normalize_message(message, peer_id)
@@ -176,31 +173,42 @@ class BaleClient:
         except Exception as e:
             logger.error("Error handling incoming message from Bale: %s", e, exc_info=True)
 
-    def _extract_peer_id(self, message: Message) -> str:
-        """Extract chat/peer ID from Message object."""
-        if hasattr(message, "chat") and message.chat:
-            return str(getattr(message.chat, "id", getattr(message.chat, "peer_id", "")))
-        if hasattr(message, "peer_id") and message.peer_id:
-            return str(message.peer_id)
-        if hasattr(message, "peer") and message.peer:
-            return str(getattr(message.peer, "id", message.peer))
-        return ""
+    def _extract_peer_info(self, message: Message) -> tuple[str, str]:
+        """Extract chat/peer ID and username from Message object."""
+        peer_id = ""
+        username = ""
 
-    def _is_target_channel(self, peer_id: str) -> bool:
-        """Compare message peer with configured target channel."""
+        if hasattr(message, "chat") and message.chat:
+            peer_id = str(getattr(message.chat, "id", getattr(message.chat, "peer_id", "")))
+            username = str(getattr(message.chat, "username", "") or "")
+        elif hasattr(message, "peer_id") and message.peer_id:
+            peer_id = str(message.peer_id)
+        elif hasattr(message, "peer") and message.peer:
+            peer_id = str(getattr(message.peer, "id", message.peer))
+
+        return peer_id, username
+
+    def _is_target_channel(self, peer_id: str, chat_username: str = "") -> bool:
+        """Compare message peer with configured target channel with flexible matching."""
         target = self.target_channel_id.strip()
         peer = peer_id.strip()
 
-        if not target or not peer:
+        if not target:
             return False
 
+        # Direct string match
         if target == peer:
             return True
 
-        # Normalize prefix variations (-100..., @...)
-        clean_target = target.removeprefix("-100").removeprefix("@")
-        clean_peer = peer.removeprefix("-100").removeprefix("@")
-        return clean_target == clean_peer
+        # Username / Handle match (@username)
+        if chat_username and target.lstrip("@").lower() == chat_username.lstrip("@").lower():
+            return True
+
+        # Clean digits comparison (strip -100, -, @)
+        clean_target = target.removeprefix("-100").removeprefix("-").removeprefix("@")
+        clean_peer = peer.removeprefix("-100").removeprefix("-").removeprefix("@")
+
+        return clean_target and clean_peer and clean_target == clean_peer
 
     async def _normalize_message(self, message: Message, peer_id: str) -> NormalizedMessage:
         """Detect supported message types and download original media."""
@@ -243,7 +251,6 @@ class BaleClient:
                 text=text,
             )
 
-        # Ignored types (sticker, voice, document, location, poll, etc.)
         return NormalizedMessage(
             message_id=msg_id,
             peer_id=peer_id,
@@ -295,18 +302,15 @@ class BaleClient:
     async def _download_media(self, message: Message, media_kind: str) -> Optional[bytes]:
         """Download media file into memory using fallbacks."""
         try:
-            # 1. message.download()
             if hasattr(message, "download") and callable(message.download):
                 res = await message.download()
                 return self._resolve_download_result(res)
 
-            # 2. photo/video object download
             media_obj = getattr(message, media_kind, None)
             if media_obj and hasattr(media_obj, "download") and callable(media_obj.download):
                 res = await media_obj.download()
                 return self._resolve_download_result(res)
 
-            # 3. client.download_media()
             if hasattr(self.client, "download_media"):
                 res = await self.client.download_media(message)
                 return self._resolve_download_result(res)
