@@ -10,7 +10,7 @@ import inspect
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Awaitable, Optional, Union
+from typing import Callable, Awaitable, Optional, Union, Any
 
 from aiobale import Client, Dispatcher
 from aiobale.types import Message
@@ -196,15 +196,12 @@ class BaleClient:
         if not target:
             return False
 
-        # Direct string match
         if target == peer:
             return True
 
-        # Username / Handle match (@username)
         if chat_username and target.lstrip("@").lower() == chat_username.lstrip("@").lower():
             return True
 
-        # Clean digits comparison (strip -100, -, @)
         clean_target = target.removeprefix("-100").removeprefix("-").removeprefix("@")
         clean_peer = peer.removeprefix("-100").removeprefix("-").removeprefix("@")
 
@@ -219,6 +216,11 @@ class BaleClient:
             logger.info("New photo")
             caption = self._extract_text(message)
             media_bytes = await self._download_media(message, "photo")
+            if media_bytes:
+                logger.info("Successfully downloaded photo (%d bytes)", len(media_bytes))
+            else:
+                logger.warning("Could not download photo media bytes for message ID %s", msg_id)
+
             return NormalizedMessage(
                 message_id=msg_id,
                 peer_id=peer_id,
@@ -232,6 +234,11 @@ class BaleClient:
             logger.info("New video")
             caption = self._extract_text(message)
             media_bytes = await self._download_media(message, "video")
+            if media_bytes:
+                logger.info("Successfully downloaded video (%d bytes)", len(media_bytes))
+            else:
+                logger.warning("Could not download video media bytes for message ID %s", msg_id)
+
             return NormalizedMessage(
                 message_id=msg_id,
                 peer_id=peer_id,
@@ -251,36 +258,85 @@ class BaleClient:
                 text=text,
             )
 
+        logger.info("Received message type that was not recognized as text, photo, or video.")
+        self._log_message_debug(message)
+
         return NormalizedMessage(
             message_id=msg_id,
             peer_id=peer_id,
             msg_type=MessageType.UNSUPPORTED,
         )
 
+    def _log_message_debug(self, message: Message) -> None:
+        """Helper to log attributes of unrecognized messages for troubleshooting."""
+        attrs = {}
+        for key in ("photo", "photos", "video", "document", "file", "media", "content", "type", "content_type", "text", "caption"):
+            val = getattr(message, key, None)
+            if val is not None:
+                attrs[key] = str(val)[:200]
+        logger.info("Message debug attributes: %s", attrs)
+
     @staticmethod
     def _is_photo(message: Message) -> bool:
         """Check if message contains a photo."""
-        if getattr(message, "photo", None):
+        if getattr(message, "photo", None) or getattr(message, "photos", None):
             return True
-        if hasattr(message, "content") and getattr(message.content, "photo", None):
+
+        content = getattr(message, "content", None)
+        if content and (getattr(content, "photo", None) or getattr(content, "photos", None)):
             return True
+
+        media = getattr(message, "media", None) or getattr(message, "attachment", None)
+        if media and (getattr(media, "photo", None) or getattr(media, "type", "") in ("photo", "image")):
+            return True
+
+        doc = getattr(message, "document", None) or getattr(message, "file", None)
+        if doc:
+            mime = getattr(doc, "mime_type", "") or getattr(doc, "mimetype", "") or ""
+            name = getattr(doc, "file_name", "") or getattr(doc, "name", "") or ""
+            if mime.startswith("image/") or name.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic")):
+                return True
+
+        msg_type = str(getattr(message, "content_type", "") or getattr(message, "type", "")).lower()
+        if "photo" in msg_type or "image" in msg_type:
+            return True
+
         return False
 
     @staticmethod
     def _is_video(message: Message) -> bool:
         """Check if message contains a video."""
-        if getattr(message, "video", None):
+        if getattr(message, "video", None) or getattr(message, "animation", None):
             return True
-        if hasattr(message, "content") and getattr(message.content, "video", None):
+
+        content = getattr(message, "content", None)
+        if content and (getattr(content, "video", None) or getattr(content, "animation", None)):
             return True
+
+        media = getattr(message, "media", None) or getattr(message, "attachment", None)
+        if media and (getattr(media, "video", None) or getattr(media, "type", "") in ("video", "animation")):
+            return True
+
+        doc = getattr(message, "document", None) or getattr(message, "file", None)
+        if doc:
+            mime = getattr(doc, "mime_type", "") or getattr(doc, "mimetype", "") or ""
+            name = getattr(doc, "file_name", "") or getattr(doc, "name", "") or ""
+            if mime.startswith("video/") or name.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
+                return True
+
+        msg_type = str(getattr(message, "content_type", "") or getattr(message, "type", "")).lower()
+        if "video" in msg_type or "animation" in msg_type:
+            return True
+
         return False
 
     @staticmethod
     def _is_plain_text(message: Message) -> bool:
         """Check if message is plain text without media attachments."""
         media_attrs = (
-            "photo", "video", "sticker", "voice", "audio",
-            "document", "location", "contact", "poll", "gift"
+            "photo", "photos", "video", "sticker", "voice", "audio",
+            "document", "file", "media", "attachment", "location",
+            "contact", "poll", "gift"
         )
         for attr in media_attrs:
             if getattr(message, attr, None):
@@ -301,26 +357,72 @@ class BaleClient:
 
     async def _download_media(self, message: Message, media_kind: str) -> Optional[bytes]:
         """Download media file into memory using fallbacks."""
-        try:
-            if hasattr(message, "download") and callable(message.download):
-                res = await message.download()
-                return self._resolve_download_result(res)
+        candidates = []
 
-            media_obj = getattr(message, media_kind, None)
-            if media_obj and hasattr(media_obj, "download") and callable(media_obj.download):
-                res = await media_obj.download()
-                return self._resolve_download_result(res)
+        # 1. Photo objects (if list/tuple, select highest resolution [-1])
+        photo_attr = getattr(message, "photo", None) or getattr(message, "photos", None)
+        if photo_attr:
+            if isinstance(photo_attr, (list, tuple)) and len(photo_attr) > 0:
+                candidates.append(photo_attr[-1])
+            else:
+                candidates.append(photo_attr)
 
-            if hasattr(self.client, "download_media"):
-                res = await self.client.download_media(message)
-                return self._resolve_download_result(res)
+        # 2. Content photo
+        content = getattr(message, "content", None)
+        if content:
+            c_photo = getattr(content, "photo", None) or getattr(content, "photos", None)
+            if c_photo:
+                if isinstance(c_photo, (list, tuple)) and len(c_photo) > 0:
+                    candidates.append(c_photo[-1])
+                else:
+                    candidates.append(c_photo)
 
-            logger.error("Could not find download method for %s", media_kind)
-            return None
+        # 3. Video objects
+        video_attr = getattr(message, "video", None)
+        if video_attr:
+            candidates.append(video_attr)
 
-        except Exception as e:
-            logger.error("Failed to download %s media: %s", media_kind, e)
-            return None
+        # 4. Document or file attribute
+        doc_attr = getattr(message, "document", None) or getattr(message, "file", None)
+        if doc_attr:
+            candidates.append(doc_attr)
+
+        # 5. Message object itself
+        candidates.append(message)
+
+        for target in candidates:
+            # Method A: target.download()
+            if hasattr(target, "download") and callable(getattr(target, "download")):
+                try:
+                    res = await target.download()
+                    data = self._resolve_download_result(res)
+                    if data:
+                        return data
+                except Exception as e:
+                    logger.debug("Candidate .download() failed: %s", e)
+
+            # Method B: client.download_media(target)
+            if hasattr(self.client, "download_media") and callable(getattr(self.client, "download_media")):
+                try:
+                    res = await self.client.download_media(target)
+                    data = self._resolve_download_result(res)
+                    if data:
+                        return data
+                except Exception as e:
+                    logger.debug("client.download_media() failed: %s", e)
+
+            # Method C: client.download_file(target)
+            if hasattr(self.client, "download_file") and callable(getattr(self.client, "download_file")):
+                try:
+                    res = await self.client.download_file(target)
+                    data = self._resolve_download_result(res)
+                    if data:
+                        return data
+                except Exception as e:
+                    logger.debug("client.download_file() failed: %s", e)
+
+        logger.error("Could not download %s media: all download strategies failed.", media_kind)
+        return None
 
     @staticmethod
     def _resolve_download_result(result: Union[bytes, str, Path]) -> Optional[bytes]:
