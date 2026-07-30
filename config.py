@@ -1,35 +1,67 @@
 """
-Configuration settings module for the Bale to Telegram Mirror application.
-Loads and validates environment variables.
+Configuration module for Bale-to-Telegram Channel Mirror.
+Loads environment variables and validates configuration parameters.
 """
 
+from dataclasses import dataclass
+import os
 from pathlib import Path
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Union
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 
-class Settings(BaseSettings):
-    """Application settings schema and environment loader."""
-    
-    # Bale Settings
-    bale_phone: str = Field(..., validation_alias="BALE_PHONE")
-    source_bale_channel: str = Field(..., validation_alias="SOURCE_BALE_CHANNEL")
+@dataclass(frozen=True)
+class Config:
+    """Application configuration container."""
 
-    # Telegram Settings
-    telegram_bot_token: str = Field(..., validation_alias="TELEGRAM_BOT_TOKEN")
-    telegram_channel_id: str = Field(..., validation_alias="TELEGRAM_CHANNEL_ID")
+    bale_phone: str
+    bale_session: str
+    bale_channel_id: Union[str, int]
+    telegram_bot_token: str
+    telegram_channel_id: Union[str, int]
 
-    # Operational Settings
-    session_dir: str = Field(default="./session_data", validation_alias="SESSION_DIR")
-    media_dir: str = Field(default="./temp_media", validation_alias="MEDIA_DIR")
-    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
-    reconnect_delay: int = Field(default=5, validation_alias="RECONNECT_DELAY")
+    @classmethod
+    def load(cls) -> "Config":
+        """
+        Load and validate environment variables.
+        Raises ValueError if required settings are missing.
+        """
+        bale_phone = os.getenv("BALE_PHONE", "").strip()
+        bale_session = os.getenv("BALE_SESSION", "bale_session").strip()
+        bale_channel_raw = os.getenv("BALE_CHANNEL_ID", "").strip()
+        telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        telegram_channel_raw = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
+        missing = []
+        if not bale_phone:
+            missing.append("BALE_PHONE")
+        if not bale_channel_raw:
+            missing.append("BALE_CHANNEL_ID")
+        if not telegram_bot_token:
+            missing.append("TELEGRAM_BOT_TOKEN")
+        if not telegram_channel_raw:
+            missing.append("TELEGRAM_CHANNEL_ID")
 
+        if missing:
+            raise ValueError(
+                f"Missing required environment variable(s): {', '.join(missing)}"
+            )
 
-settings = Settings()
+        # Helper to parse channel IDs (integer or string handle)
+        def _parse_channel_id(raw_id: str) -> Union[str, int]:
+            try:
+                return int(raw_id)
+            except ValueError:
+                return raw_id
+
+        return cls(
+            bale_phone=bale_phone,
+            bale_session=bale_session,
+            bale_channel_id=_parse_channel_id(bale_channel_raw),
+            telegram_bot_token=telegram_bot_token,
+            telegram_channel_id=_parse_channel_id(telegram_channel_raw),
+        )

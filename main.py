@@ -1,89 +1,112 @@
 """
-Main application entry point for Bale-to-Telegram channel mirror service.
+Main application entry point.
+Initializes configuration, logging, signal handlers, and application loop.
 """
 
 import asyncio
 import logging
 import signal
 import sys
-import time
 
-from bale_client import BaleClientWrapper
-from config import settings
-from handlers import MessageHandler
-from media import MediaManager
+from config import Config
+from bale_client import BaleClient
 from telegram_client import TelegramClient
-
-# Setup Application Logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-
-logger = logging.getLogger("bale_telegram_mirror")
+from bridge import MessageBridge
 
 
-async def main() -> None:
-    """Main execution coroutine."""
-    logger.info("Initializing Bale-to-Telegram Mirror service...")
-    startup_timestamp = time.time()
+def setup_logging() -> None:
+    """Configure structured logging output."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
 
-    # Core system components
-    media_manager = MediaManager(media_dir=settings.media_dir)
+
+async def async_main() -> None:
+    """Asynchronous setup and execution loop."""
+    setup_logging()
+    logger = logging.getLogger("Main")
+    logger.info("Starting Bale -> Telegram Channel Mirror Application...")
+
+    # Load configuration
+    try:
+        config = Config.load()
+    except ValueError as err:
+        logger.critical("Configuration error: %s", err)
+        sys.exit(1)
+
+    # Initialize Telegram Bot Client
     telegram_client = TelegramClient(
-        bot_token=settings.telegram_bot_token,
-        channel_id=settings.telegram_channel_id
+        token=config.telegram_bot_token,
+        channel_id=config.telegram_channel_id,
     )
-    await telegram_client.start()
+    await telegram_client.initialize()
 
-    message_handler = MessageHandler(
+    # Initialize Bale Userbot Client
+    bale_client = BaleClient(
+        phone_number=config.bale_phone,
+        session_name=config.bale_session,
+        target_channel_id=config.bale_channel_id,
+    )
+
+    # Initialize Bridge
+    _ = MessageBridge(
+        bale_client=bale_client,
         telegram_client=telegram_client,
-        media_manager=media_manager,
-        startup_timestamp=startup_timestamp
     )
 
-    bale_client = BaleClientWrapper(
-        phone=settings.bale_phone,
-        source_channel=settings.source_bale_channel,
-        session_dir=settings.session_dir,
-        reconnect_delay=settings.reconnect_delay
-    )
-    bale_client.set_message_handler(message_handler.process_message)
-
-    # Setup Graceful Signal Handling
-    loop = asyncio.get_running_loop()
+    # Setup Graceful Shutdown via Signals
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def shutdown_signal_handler():
-        logger.info("Received termination signal. Initiating shutdown sequence...")
+    def _on_shutdown_signal(sig_name: str) -> None:
+        logger.info("Received signal %s. Shutting down gracefully...", sig_name)
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, shutdown_signal_handler)
+            loop.add_signal_handler(sig, lambda s=sig.name: _on_shutdown_signal(s))
         except NotImplementedError:
-            # Signal handling on Windows platforms
-            pass
+            pass  # Windows signal handling fallback
 
-    # Launch Bale Client Task
-    bale_task = asyncio.create_task(bale_client.start())
-
+    # Authenticate and start Bale client
     try:
-        await stop_event.wait()
+        await bale_client.authenticate_and_start()
+    except Exception as e:
+        logger.critical("Failed to start Bale client: %s", e)
+        sys.exit(1)
+
+    bale_task = asyncio.create_task(bale_client.run_forever())
+
+    logger.info("Mirror application is active. Press Ctrl+C to terminate.")
+
+    # Wait until shutdown signal or Bale task failure
+    await asyncio.wait(
+        [bale_task, asyncio.create_task(stop_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    logger.info("Stopping components...")
+    await bale_client.stop()
+
+    bale_task.cancel()
+    try:
+        await bale_task
     except asyncio.CancelledError:
         pass
-    finally:
-        logger.info("Cleaning up and stopping resources...")
-        bale_task.cancel()
-        await bale_client.stop()
-        await telegram_client.stop()
-        media_manager.cleanup_all()
-        logger.info("Application successfully stopped.")
+
+    logger.info("Application stopped gracefully.")
+
+
+def main() -> None:
+    """Application entry point."""
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Process terminated by system.")
+    main()

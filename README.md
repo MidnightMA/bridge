@@ -1,69 +1,150 @@
-# Bale-to-Telegram Channel Mirror
+# Bale to Telegram Channel Mirror
 
-A robust Python 3.12 asynchronous application that monitors a **Bale Messenger** channel using a user self-account (`baleself`) and automatically mirrors text, photo, and video messages to a **Telegram** channel via Telegram Bot API.
+A production-quality Python 3.11+ application that mirrors text, photo, and video messages from a **Bale channel** to a **Telegram channel** in real time.
 
-## Features
-
-- ⚡ **Python 3.12 & asyncio**: Modern, fast async loop architecture.
-- 📱 **Bale Self-Account**: Connects directly using [`baleself`](https://github.com/Zellias/baleself).
-- 🤖 **Telegram Bot Integration**: Sends text, photos, and videos via official API endpoints (`sendMessage`, `sendPhoto`, `sendVideo`).
-- 📁 **Supported Formats**:
-  - Text messages (exact content)
-  - Photos (highest resolution with captions)
-  - Videos (with captions)
-  - *Ignores documents, audio, stickers, and voice messages.*
-- 🛡️ **No Duplication & Old Message Prevention**: Ignores historical messages pre-dating application startup and maintains processed ID tracking.
-- 🔄 **Auto-Reconnect & Failover**: Automatic exponential-backoff reconnects if Bale disconnects. Telegram send errors are logged while keeping the service running continuously.
-- 🔐 **Session Persistence**: Persists Bale authentication session locally so login is required only once.
+The application operates as a **real user account on Bale** (via `aiobale`) and posts updates to Telegram using the official **Telegram Bot API**.
 
 ---
 
-## Setup & Running Instructions
+## Features
 
-### 1. Prerequisites
-- **Python 3.12** or higher installed.
-- A Bale user account (added as a member/admin in the source Bale channel).
-- A Telegram Bot token (from `@BotFather`) added as an Administrator in your destination Telegram Channel.
+- 👤 **Bale Userbot**: Logs into a real Bale account using phone number and session file.
+- 🤖 **Telegram Bot Integration**: Posts messages directly to your Telegram channel.
+- 📷 **Full Media Support**: Forwards plain text, photos (with captions), and videos (with captions).
+- 🚫 **Media Filtering**: Automatically ignores stickers, voice notes, files, polls, contacts, locations, and audio clips.
+- 🔁 **Automatic Reconnection**: Automatically reconnects to Bale if connection drops.
+- 🛡️ **Duplicate Prevention**: In-memory cache ensures messages are not re-sent after reconnects.
+- 🛑 **Graceful Shutdown**: Listens for SIGINT/SIGTERM signals to shut down cleanly.
 
-### 2. Installation
+---
 
-Clone the repository and enter the directory:
+## Requirements
+
+- **Python 3.11+**
+- A real **Bale Account** with access to the source channel.
+- A **Telegram Bot** (created via [@BotFather](https://t.me/BotFather)) added as an **Administrator** in the destination Telegram channel.
+
+---
+
+## Installation
+
+### 1. Clone or Download Project
 ```bash
 git clone https://github.com/MidnightMA/bridge.git
 cd bridge
 ```
 
-Create and activate a virtual environment:
+### 2. Create and Activate Virtual Environment
 ```bash
-python3.12 -m venv venv
-source venv/bin/activate  # On Windows use: venv\Scripts\activate
+python3 -m venv venv
+
+# Linux/macOS
+source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
 ```
 
-Install the dependencies:
+### 3. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configuration
+---
 
-Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
+## Configuration
 
-Edit `.env` with your values:
-```env
-BALE_PHONE=+989123456789
-SOURCE_BALE_CHANNEL=my_bale_channel
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyZ
-TELEGRAM_CHANNEL_ID=-1001234567890
-```
+1. Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
 
-### 4. Running the Application
+2. Edit `.env` with your settings:
 
-Start the mirror application:
+   ```env
+   # Bale Side (Real User Account)
+   BALE_PHONE=+989123456789
+   BALE_SESSION=bale_userbot_session
+   BALE_CHANNEL_ID=-1001234567890
+
+   # Telegram Side (Bot API)
+   TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+   TELEGRAM_CHANNEL_ID=-1009876543210
+   ```
+
+### Finding Channel IDs
+
+- **Bale Channel ID**: Obtain the ID or username of the Bale channel you wish to monitor.
+- **Telegram Channel ID**: Add `@BotFather` bot to your target Telegram channel as Administrator, then retrieve the channel ID (usually starts with `-100`).
+
+---
+
+## First Login & Session Creation
+
+On the first run, `aiobale` will require interactive authentication to create your session file:
+
+1. Launch the application:
+   ```bash
+   python main.py
+   ```
+2. You will be prompted in the terminal to enter:
+   - Your phone number (if not set in `.env`)
+   - The OTP login code sent to your Bale account / SMS.
+3. Once authenticated, a session file (`bale_userbot_session.session`) will be saved locally.
+4. Subsequent runs will use this saved session automatically without prompting.
+
+---
+
+## Running the Application
+
+To run in the foreground:
 ```bash
 python main.py
 ```
 
-*Note: On your first run, `baleself` may prompt for an SMS login code sent to your Bale account. Once completed, the session is saved inside `./session_data` for subsequent automatic logins.*
+### Output Example
+```text
+2026-07-30 20:00:00 [INFO] Main: Starting Bale -> Telegram Channel Mirror Application...
+2026-07-30 20:00:01 [INFO] telegram_client: Connected to Telegram as @MyMirrorBot (Bot ID: 987654321)
+2026-07-30 20:00:02 [INFO] bale_client: Connected to Bale
+2026-07-30 20:00:02 [INFO] bale_client: Logged in successfully
+2026-07-30 20:00:02 [INFO] bale_client: Watching channel -1001234567890 ...
+2026-07-30 20:01:10 [INFO] bale_client: New photo
+2026-07-30 20:01:12 [INFO] bridge: Forwarded successfully
+```
+
+---
+
+## Production Deployment (Systemd)
+
+To run the application continuously on a Linux server:
+
+1. Create a Systemd service file:
+   ```bash
+   sudo nano /etc/systemd/system/bale-mirror.service
+   ```
+
+2. Paste the following configuration (adjust paths and user):
+   ```ini
+   [Unit]
+   Description=Bale to Telegram Mirror Service
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/bale-telegram-mirror
+   ExecStart=/home/ubuntu/bale-telegram-mirror/venv/bin/python main.py
+   Restart=always
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. Enable and start the service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable bale-mirror
+   sudo systemctl start bale-mirror
+   ```
