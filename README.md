@@ -24,7 +24,7 @@ A production-quality, asynchronous message bridge that automatically monitors up
 
 ### 2. Installation Steps
 ```bash
-git clone <repository_url> bridge
+git clone https://github.com/MidnightMA/bridge.git
 cd bridge
 
 # Create and activate virtual environment
