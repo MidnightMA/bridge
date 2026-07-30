@@ -62,7 +62,7 @@ class BaleClient:
         self.dispatcher = Dispatcher()
         self.client = Client(
             session=self.session_name,
-            phone_number=self.phone_number,
+            # phone_number=self.phone_number,
             dispatcher=self.dispatcher,
         )
 
