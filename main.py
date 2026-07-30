@@ -41,6 +41,9 @@ async def async_main() -> None:
     telegram_client = TelegramClient(
         token=config.telegram_bot_token,
         channel_id=config.telegram_channel_id,
+        proxy_url=config.telegram_proxy_url,
+        connect_timeout=config.telegram_connect_timeout,
+        read_timeout=config.telegram_read_timeout,
     )
     await telegram_client.initialize()
 
@@ -57,7 +60,7 @@ async def async_main() -> None:
         telegram_client=telegram_client,
     )
 
-    # Setup Graceful Shutdown via Signals
+    # Setup Graceful Shutdown
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -69,9 +72,8 @@ async def async_main() -> None:
         try:
             loop.add_signal_handler(sig, lambda s=sig.name: _on_shutdown_signal(s))
         except NotImplementedError:
-            pass  # Windows signal handling fallback
+            pass
 
-    # Authenticate and start Bale client
     try:
         await bale_client.authenticate_and_start()
     except Exception as e:
@@ -82,7 +84,6 @@ async def async_main() -> None:
 
     logger.info("Mirror application is active. Press Ctrl+C to terminate.")
 
-    # Wait until shutdown signal or Bale task failure
     await asyncio.wait(
         [bale_task, asyncio.create_task(stop_event.wait())],
         return_when=asyncio.FIRST_COMPLETED,

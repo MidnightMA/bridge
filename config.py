@@ -6,7 +6,7 @@ Loads environment variables and validates configuration parameters.
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -23,6 +23,9 @@ class Config:
     bale_channel_id: Union[str, int]
     telegram_bot_token: str
     telegram_channel_id: Union[str, int]
+    telegram_proxy_url: Optional[str] = None
+    telegram_connect_timeout: float = 30.0
+    telegram_read_timeout: float = 60.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -35,6 +38,7 @@ class Config:
         bale_channel_raw = os.getenv("BALE_CHANNEL_ID", "").strip()
         telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         telegram_channel_raw = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+        telegram_proxy_url = os.getenv("TELEGRAM_PROXY_URL", "").strip() or None
 
         missing = []
         if not bale_phone:
@@ -51,12 +55,21 @@ class Config:
                 f"Missing required environment variable(s): {', '.join(missing)}"
             )
 
-        # Helper to parse channel IDs (integer or string handle)
         def _parse_channel_id(raw_id: str) -> Union[str, int]:
             try:
                 return int(raw_id)
             except ValueError:
                 return raw_id
+
+        try:
+            connect_timeout = float(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30.0"))
+        except ValueError:
+            connect_timeout = 30.0
+
+        try:
+            read_timeout = float(os.getenv("TELEGRAM_READ_TIMEOUT", "60.0"))
+        except ValueError:
+            read_timeout = 60.0
 
         return cls(
             bale_phone=bale_phone,
@@ -64,4 +77,7 @@ class Config:
             bale_channel_id=_parse_channel_id(bale_channel_raw),
             telegram_bot_token=telegram_bot_token,
             telegram_channel_id=_parse_channel_id(telegram_channel_raw),
+            telegram_proxy_url=telegram_proxy_url,
+            telegram_connect_timeout=connect_timeout,
+            telegram_read_timeout=read_timeout,
         )
