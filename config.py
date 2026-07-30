@@ -1,45 +1,35 @@
-"""Configuration management module."""
+"""
+Configuration settings module for the Bale to Telegram Mirror application.
+Loads and validates environment variables.
+"""
 
-import os
 from pathlib import Path
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Config:
-    """Application configuration loader and validator."""
+class Settings(BaseSettings):
+    """Application settings schema and environment loader."""
+    
+    # Bale Settings
+    bale_phone: str = Field(..., validation_alias="BALE_PHONE")
+    source_bale_channel: str = Field(..., validation_alias="SOURCE_BALE_CHANNEL")
 
-    def __init__(self) -> None:
-        self.telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        self.telegram_channel_id: str = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
+    # Telegram Settings
+    telegram_bot_token: str = Field(..., validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_channel_id: str = Field(..., validation_alias="TELEGRAM_CHANNEL_ID")
 
-        self.bale_phone_number: str = os.getenv("BALE_PHONE_NUMBER", "").strip()
-        self.bale_session: str = os.getenv("BALE_SESSION", "").strip()
-        self.bale_channel_id: str = os.getenv("BALE_CHANNEL_ID", "").strip()
+    # Operational Settings
+    session_dir: str = Field(default="./session_data", validation_alias="SESSION_DIR")
+    media_dir: str = Field(default="./temp_media", validation_alias="MEDIA_DIR")
+    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    reconnect_delay: int = Field(default=5, validation_alias="RECONNECT_DELAY")
 
-        self.temp_dir: Path = Path(os.getenv("MEDIA_TEMP_DIR", "temp_media"))
-        self.db_path: Path = Path(os.getenv("DB_PATH", "processed_messages.db"))
-        self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
-        self.max_retries: int = int(os.getenv("MAX_RETRIES", "3"))
-        self.retry_delay: float = float(os.getenv("RETRY_DELAY", "2.0"))
 
-    def validate(self) -> None:
-        """Validates that all required environment variables are set."""
-        missing = []
-        if not self.telegram_bot_token:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        if not self.telegram_channel_id:
-            missing.append("TELEGRAM_CHANNEL_ID")
-        if not self.bale_phone_number:
-            missing.append("BALE_PHONE_NUMBER")
-        if not self.bale_channel_id:
-            missing.append("BALE_CHANNEL_ID")
-
-        if missing:
-            raise ValueError(
-                f"Missing required environment variables: {', '.join(missing)}. "
-                "Please check your .env file."
-            )
+settings = Settings()

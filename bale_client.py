@@ -1,259 +1,135 @@
-"""Bale Personal Account Client (Userbot) Engine.
-
-Supports:
-1. Selenium Web Automation with persistent browser profiles (Zellias/baleself style).
-2. Direct WebSocket monitoring using LocalStorage / WebSocket tokens.
+"""
+Bale Client wrapper module utilizing the baleself library.
 """
 
 import asyncio
-import json
 import logging
-import os
-import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-import aiohttp
+try:
+    import baleself
+except ImportError as err:
+    raise ImportError("The 'baleself' library is required. Install via git repo or pip.") from err
 
-logger = logging.getLogger("bridge.bale_client")
-
-BALE_WEB_URL = "https://web.bale.ai"
-BALE_WS_URL = "wss://next-ws.bale.ai/ws/"
-PROFILE_DIR = os.path.abspath("bale_browser_profile")
+logger = logging.getLogger(__name__)
 
 
-class BaleUserClient:
-    """Client for monitoring personal Bale account via Web Session or Selenium."""
+class BaleClientWrapper:
+    """
+    Wrapper for baleself user account client with persistent login
+    and auto-reconnect logic.
+    """
 
     def __init__(
         self,
-        phone_number: str,
-        session_token: str,
-        channel_id: str,
-        on_message_callback: Callable[[Dict[str, Any]], Any],
-        use_selenium: bool = True,
+        phone: str,
+        source_channel: str,
+        session_dir: str = "./session_data",
+        reconnect_delay: int = 5
     ) -> None:
-        self.phone_number = phone_number
-        self.session_token = session_token
-        self.channel_id = str(channel_id)
-        self.on_message_callback = on_message_callback
-        self.use_selenium = use_selenium
-        self.is_running = False
+        self.phone = phone
+        self.source_channel = str(source_channel).strip()
+        self.session_dir = Path(session_dir)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.reconnect_delay = reconnect_delay
+        
+        self.client: Optional[Any] = None
+        self._message_handler: Optional[Callable[[Any], Awaitable[None]]] = None
+        self._is_running = False
 
-    def _parse_message(self, raw_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Parses raw update payloads into standardized structure."""
-        try:
-            msg = raw_data.get("message") or raw_data.get("body") or raw_data
-            chat_id = str(
-                msg.get("chat_id")
-                or msg.get("peer_id")
-                or msg.get("chat", {}).get("id", "")
-            )
+    def set_message_handler(self, handler: Callable[[Any], Awaitable[None]]) -> None:
+        """Registers external async handler for processed messages."""
+        self._message_handler = handler
 
-            # Filter for specific target channel
-            if chat_id and chat_id != self.channel_id:
-                return None
+    def _create_client_instance(self) -> Any:
+        """Instantiates baleself Client with designated session file path."""
+        session_file = str(self.session_dir / f"session_{self.phone.replace('+', '')}")
+        logger.info(f"Using Bale session path: {session_file}")
+        
+        if hasattr(baleself, "Client"):
+            return baleself.Client(session=session_file, phone=self.phone)
+        if hasattr(baleself, "BaleClient"):
+            return baleself.BaleClient(session=session_file, phone=self.phone)
+        
+        raise AttributeError("Could not resolve Client class from baleself package.")
 
-            msg_id = str(msg.get("id") or msg.get("message_id") or msg.get("msg_id", ""))
-            if not msg_id:
-                return None
-
-            # 1. Text Message
-            if "text" in msg and not msg.get("photo") and not msg.get("video"):
-                return {
-                    "id": msg_id,
-                    "type": "text",
-                    "text": msg["text"],
-                    "media_url": None,
-                    "caption": None,
-                }
-
-            # 2. Photo Message
-            if "photo" in msg or msg.get("media_type") == "photo":
-                photo_info = msg.get("photo", {})
-                url = photo_info.get("file_url") or photo_info.get("url") or photo_info.get("src")
-                caption = msg.get("caption") or msg.get("text")
-                if url:
-                    return {
-                        "id": msg_id,
-                        "type": "photo",
-                        "text": None,
-                        "media_url": url,
-                        "caption": caption,
-                    }
-
-            # 3. Video Message
-            if "video" in msg or msg.get("media_type") == "video":
-                video_info = msg.get("video", {})
-                url = video_info.get("file_url") or video_info.get("url") or video_info.get("src")
-                caption = msg.get("caption") or msg.get("text")
-                if url:
-                    return {
-                        "id": msg_id,
-                        "type": "video",
-                        "text": None,
-                        "media_url": url,
-                        "caption": caption,
-                    }
-
-            return None
-        except Exception as e:
-            logger.debug(f"Parsing update failed: {e}")
-            return None
-
-    async def _run_selenium_client(self) -> None:
-        """Runs Selenium WebDriver wrapper with saved profile (baleself approach)."""
-        logger.info("Initializing Selenium WebDriver for Bale userbot automation...")
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.chrome.service import Service
-            from webdriver_manager.chrome import ChromeDriverManager
-        except ImportError:
-            logger.error("Selenium required. Install via: pip install selenium webdriver-manager")
+    async def _on_raw_message(self, message: Any) -> None:
+        """Filters message by source channel and forwards to application handler."""
+        if not self._message_handler:
             return
 
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=chrome_options
-        )
-
         try:
-            driver.get(BALE_WEB_URL)
-            logger.info("Bale Web loaded successfully in Selenium driver.")
-            processed_ids = set()
+            # Extract identifiers from incoming Bale message object
+            peer_id = str(getattr(message, "chat_id", None) or getattr(message, "peer_id", None) or "")
+            chat = getattr(message, "chat", None)
+            chat_username = str(getattr(chat, "username", "") or "").lstrip("@")
+            chat_title = str(getattr(chat, "title", "") or "")
+            
+            target = self.source_channel.lstrip("@").lower()
 
-            while self.is_running:
-                await asyncio.sleep(3)
-                try:
-                    # Extracts channel messages directly from the DOM
-                    messages = driver.execute_script("""
-                        let msgs = [];
-                        let elements = document.querySelectorAll('.message-item, [data-message-id]');
-                        elements.forEach(el => {
-                            let id = el.getAttribute('data-message-id') || el.id;
-                            let text = el.innerText || '';
-                            let img = el.querySelector('img');
-                            let video = el.querySelector('video');
-                            let mediaUrl = img ? img.src : (video ? video.src : null);
-                            let type = video ? 'video' : (img ? 'photo' : 'text');
-                            if (id) {
-                                msgs.push({id: id, type: type, text: text, media_url: mediaUrl, caption: text});
-                            }
-                        });
-                        return msgs;
-                    """)
-
-                    for m in messages:
-                        m_id = str(m.get("id"))
-                        if m_id and m_id not in processed_ids:
-                            processed_ids.add(m_id)
-                            parsed = self._parse_message(m)
-                            if parsed:
-                                await self.on_message_callback(parsed)
-
-                except Exception as ex:
-                    logger.debug(f"Selenium polling cycle error: {ex}")
-
-        finally:
-            driver.quit()
-
-    async def _run_websocket_client(self) -> None:
-        """Runs direct WebSocket listener using token."""
-        backoff = 2.0
-        headers = {
-            "Authorization": f"Bearer {self.session_token}",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            "Origin": BALE_WEB_URL,
-        }
-
-        while self.is_running:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    ws_endpoint = f"{BALE_WS_URL}?token={self.session_token}"
-                    async with session.ws_connect(ws_endpoint, headers=headers, heartbeat=25.0) as ws:
-                        logger.info("Connected to Bale WebSocket stream.")
-                        backoff = 2.0
-                        await ws.send_json({"action": "subscribe", "channel_id": self.channel_id})
-
-                        async for msg in ws:
-                            if not self.is_running:
-                                break
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                try:
-                                    data = json.loads(msg.data)
-                                    parsed = self._parse_message(data)
-                                    if parsed:
-                                        asyncio.create_task(self.on_message_callback(parsed))
-                                except json.JSONDecodeError:
-                                    pass
-                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                break
-            except Exception as e:
-                logger.error(f"WebSocket error: {e}. Reconnecting in {backoff}s...")
-
-            if self.is_running:
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 60.0)
+            # Matches either Chat ID, Username, or Channel Title
+            if target in (peer_id.lower(), chat_username.lower(), chat_title.lower()):
+                logger.debug(f"Matched incoming message from source Bale channel: {self.source_channel}")
+                await self._message_handler(message)
+            else:
+                logger.debug(f"Ignored message from unmonitored source: peer_id={peer_id}, title={chat_title}")
+        except Exception as e:
+            logger.error(f"Error filtering Bale message: {e}", exc_info=True)
 
     async def start(self) -> None:
-        """Starts monitoring stream."""
-        self.is_running = True
-        if self.use_selenium or not self.session_token:
-            await self._run_selenium_client()
-        else:
-            await self._run_websocket_client()
+        """Main connection and auto-reconnect event loop."""
+        self._is_running = True
 
-    def stop(self) -> None:
-        """Stops client loop."""
-        self.is_running = False
+        while self._is_running:
+            try:
+                logger.info("Connecting to Bale userbot account...")
+                self.client = self._create_client_instance()
 
+                # Register event callback
+                if hasattr(self.client, "on_message"):
+                    @self.client.on_message()
+                    async def event_wrapper(msg):
+                        await self._on_raw_message(msg)
+                elif hasattr(self.client, "add_event_handler"):
+                    self.client.add_event_handler(self._on_raw_message)
 
-def setup_selenium_login() -> None:
-    """Helper CLI tool to initialize browser session interactively (baleself style)."""
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-    except ImportError:
-        print("Please install selenium: pip install selenium webdriver-manager")
-        sys.exit(1)
+                if hasattr(self.client, "start"):
+                    await self.client.start()
+                elif hasattr(self.client, "connect"):
+                    await self.client.connect()
 
-    print("\n--- Bale Selenium Account Login ---")
-    print(f"Saving browser profile to: {PROFILE_DIR}")
+                logger.info("Bale client connected and active.")
 
-    chrome_options = Options()
-    # Runs non-headless so you can enter phone number and SMS OTP code
-    chrome_options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-    chrome_options.add_argument("--no-sandbox")
+                # Keep loop active listening for events
+                if hasattr(self.client, "run_until_disconnected"):
+                    await self.client.run_until_disconnected()
+                elif hasattr(self.client, "idle"):
+                    await self.client.idle()
+                else:
+                    while self._is_running:
+                        await asyncio.sleep(1)
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()), options=chrome_options
-    )
-    driver.get(BALE_WEB_URL)
+            except asyncio.CancelledError:
+                logger.info("Bale client task cancellation requested.")
+                self._is_running = False
+                break
+            except Exception as e:
+                logger.error(
+                    f"Bale client connection error: {e}. Reconnecting in {self.reconnect_delay} seconds...",
+                    exc_info=True
+                )
+                await asyncio.sleep(self.reconnect_delay)
 
-    print("\n1. Login to your Bale account in the opened Chrome browser window.")
-    print("2. Once logged in and viewing your chat list, press ENTER in this terminal to save session.\n")
-    input("Press ENTER when logged in: ")
-
-    driver.quit()
-    print(f"[SUCCESS] Profile saved to '{PROFILE_DIR}'. You can now run 'python main.py'.\n")
-
-
-if __name__ == "__main__":
-    if "--login-selenium" in sys.argv:
-        setup_selenium_login()
-    else:
-        print("\nUsage options:")
-        print("1. Automatic Selenium Login (Recommended):")
-        print("   python bale_client.py --login-selenium\n")
-        print("2. Manual LocalStorage Token Extraction:")
-        print("   - Open F12 -> Application -> Local Storage -> https://web.bale.ai")
-        print("   - Copy 'auth' or 'token' key value into .env BALE_SESSION\n")
+    async def stop(self) -> None:
+        """Safely stops and disconnects the Bale client session."""
+        self._is_running = False
+        if self.client:
+            try:
+                if hasattr(self.client, "disconnect"):
+                    await self.client.disconnect()
+                elif hasattr(self.client, "stop"):
+                    await self.client.stop()
+                logger.info("Bale client disconnected successfully.")
+            except Exception as e:
+                logger.warning(f"Error during Bale client disconnection: {e}")

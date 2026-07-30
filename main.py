@@ -1,86 +1,89 @@
-"""Main application entry point."""
+"""
+Main application entry point for Bale-to-Telegram channel mirror service.
+"""
 
 import asyncio
+import logging
 import signal
 import sys
-from typing import Any
+import time
 
-from bale_client import BaleUserClient
-from config import Config
-from downloader import Downloader
-from forwarder import MessageForwarder
-from logger import setup_logger
+from bale_client import BaleClientWrapper
+from config import settings
+from handlers import MessageHandler
+from media import MediaManager
 from telegram_client import TelegramClient
+
+# Setup Application Logging
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger("bale_telegram_mirror")
 
 
 async def main() -> None:
-    """Initializes and executes the message bridge application."""
-    # 1. Load configuration
-    config = Config()
-    config.validate()
+    """Main execution coroutine."""
+    logger.info("Initializing Bale-to-Telegram Mirror service...")
+    startup_timestamp = time.time()
 
-    # 2. Setup Logger
-    logger = setup_logger("bridge", config.log_level)
-    logger.info("Initializing Bale -> Telegram Message Bridge Service...")
-
-    # 3. Instantiate components
-    downloader = Downloader(temp_dir=config.temp_dir)
-    
+    # Core system components
+    media_manager = MediaManager(media_dir=settings.media_dir)
     telegram_client = TelegramClient(
-        bot_token=config.telegram_bot_token,
-        target_channel_id=config.telegram_channel_id,
-        max_retries=config.max_retries,
-        retry_delay=config.retry_delay,
+        bot_token=settings.telegram_bot_token,
+        channel_id=settings.telegram_channel_id
     )
+    await telegram_client.start()
 
-    forwarder = MessageForwarder(
+    message_handler = MessageHandler(
         telegram_client=telegram_client,
-        downloader=downloader,
-        db_path=config.db_path,
+        media_manager=media_manager,
+        startup_timestamp=startup_timestamp
     )
 
-    # 4. Initialize Bale User Client
-    bale_client = BaleUserClient(
-        phone_number=config.bale_phone_number,
-        session_token=config.bale_session,
-        channel_id=config.bale_channel_id,
-        on_message_callback=forwarder.process_message,
+    bale_client = BaleClientWrapper(
+        phone=settings.bale_phone,
+        source_channel=settings.source_bale_channel,
+        session_dir=settings.session_dir,
+        reconnect_delay=settings.reconnect_delay
     )
+    bale_client.set_message_handler(message_handler.process_message)
 
-    # 5. Register signal handlers for graceful shutdown
+    # Setup Graceful Signal Handling
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
-    def shutdown_handler(sig_name: str) -> None:
-        logger.info(f"Received shutdown signal ({sig_name}). Stopping service...")
-        bale_client.stop()
+    def shutdown_signal_handler():
+        logger.info("Received termination signal. Initiating shutdown sequence...")
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, lambda s=sig.name: shutdown_handler(s))
+            loop.add_signal_handler(sig, shutdown_signal_handler)
         except NotImplementedError:
-            # Signal handling on non-Unix systems (e.g. Windows)
+            # Signal handling on Windows platforms
             pass
 
-    # 6. Run Bale monitoring loop
+    # Launch Bale Client Task
     bale_task = asyncio.create_task(bale_client.start())
 
-    logger.info("Service initialized and actively monitoring updates...")
-    await stop_event.wait()
-
-    # Cancel tasks and clean up
-    bale_task.cancel()
     try:
-        await bale_task
+        await stop_event.wait()
     except asyncio.CancelledError:
         pass
-
-    logger.info("Bridge service stopped cleanly.")
+    finally:
+        logger.info("Cleaning up and stopping resources...")
+        bale_task.cancel()
+        await bale_client.stop()
+        await telegram_client.stop()
+        media_manager.cleanup_all()
+        logger.info("Application successfully stopped.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        sys.exit(0)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Process terminated by system.")
