@@ -215,6 +215,11 @@ class BaleClient:
         if self._is_photo(message):
             logger.info("New photo")
             caption = self._extract_text(message)
+            if caption:
+                logger.info("Extracted photo caption: '%s'", caption)
+            else:
+                logger.info("No caption found for this photo.")
+
             media_bytes = await self._download_media(message, "photo")
             if media_bytes:
                 logger.info("Successfully downloaded photo (%d bytes)", len(media_bytes))
@@ -233,6 +238,11 @@ class BaleClient:
         if self._is_video(message):
             logger.info("New video")
             caption = self._extract_text(message)
+            if caption:
+                logger.info("Extracted video caption: '%s'", caption)
+            else:
+                logger.info("No caption found for this video.")
+
             media_bytes = await self._download_media(message, "video")
             if media_bytes:
                 logger.info("Successfully downloaded video (%d bytes)", len(media_bytes))
@@ -346,20 +356,36 @@ class BaleClient:
 
     @classmethod
     def _extract_text(cls, obj: Any, depth: int = 0) -> str:
-        """Extract text or caption from message or nested forwarded/replied messages."""
-        if obj is None or depth > 4:
+        """Extract text or caption from message or nested forwarded/replied messages and documents."""
+        if obj is None or depth > 5:
             return ""
 
-        text = getattr(obj, "caption", None) or getattr(obj, "text", None)
-        if text and str(text).strip():
-            return str(text).strip()
+        # Direct attribute checks
+        for text_attr in ("caption", "text", "description"):
+            val = getattr(obj, text_attr, None)
+            if val is not None and str(val).strip():
+                text_str = str(val).strip()
+                if text_str and text_str != "None":
+                    return text_str
 
-        for attr in ("content", "replied_to", "quoted_replied_to", "message"):
+        # Child attributes to traverse
+        child_attrs = (
+            "content", "document", "photo", "photos", "video",
+            "media", "attachment", "file", "replied_to",
+            "quoted_replied_to", "previous_message", "message"
+        )
+        for attr in child_attrs:
             child = getattr(obj, attr, None)
-            if child:
-                res = cls._extract_text(child, depth + 1)
-                if res:
-                    return res
+            if child is not None:
+                if isinstance(child, (list, tuple)):
+                    for item in child:
+                        res = cls._extract_text(item, depth + 1)
+                        if res:
+                            return res
+                else:
+                    res = cls._extract_text(child, depth + 1)
+                    if res:
+                        return res
 
         return ""
 
