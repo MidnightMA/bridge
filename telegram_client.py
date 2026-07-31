@@ -1,11 +1,11 @@
 """
 Telegram client wrapper using python-telegram-bot.
-Handles uploading text, photo, and video messages to Telegram channel with proxy and timeout support.
+Handles uploading text, photo, video, and media group albums to Telegram channel with proxy and timeout support.
 """
 
 import logging
-from typing import Optional, Union
-from telegram import Bot
+from typing import Any, Dict, List, Optional, Union
+from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
@@ -31,13 +31,12 @@ class TelegramClient:
 
         :param token: Bot API token from @BotFather
         :param channel_id: Target channel ID or username
-        :param proxy_url: Optional HTTP/SOCKS5 proxy URL (e.g. http://127.0.0.1:8080 or socks5://127.0.0.1:1080)
+        :param proxy_url: Optional HTTP/SOCKS5 proxy URL
         :param connect_timeout: HTTP connect timeout in seconds
         :param read_timeout: HTTP read timeout in seconds
         """
         self.channel_id = channel_id
 
-        # Build custom request client with increased timeouts and optional proxy
         request_kwargs = {
             "connect_timeout": connect_timeout,
             "read_timeout": read_timeout,
@@ -118,6 +117,47 @@ class TelegramClient:
             return msg.message_id
         except TelegramError as e:
             logger.error("Telegram error uploading video: %s", e)
+            return None
+
+    async def send_media_group(self, items: List[Dict[str, Any]]) -> Optional[List[int]]:
+        """
+        Send a media group (album) to the Telegram channel.
+        items elements contain: {'type': MessageType, 'bytes': bytes, 'caption': Optional[str]}
+        """
+        if not items:
+            return None
+
+        # Extract caption from whichever item has a non-empty caption string
+        album_caption = None
+        for item in items:
+            if item.get("caption"):
+                album_caption = item["caption"]
+                break
+
+        formatted_caption = self._format_caption(album_caption)
+
+        media_list = []
+        for idx, item in enumerate(items):
+            cap = formatted_caption if idx == 0 else None
+            # Compare by string representation or type name
+            type_str = str(item.get("type", "")).lower()
+
+            if "photo" in type_str:
+                media_list.append(InputMediaPhoto(media=item["bytes"], caption=cap))
+            elif "video" in type_str:
+                media_list.append(InputMediaVideo(media=item["bytes"], caption=cap))
+
+        if not media_list:
+            return None
+
+        try:
+            messages = await self.bot.send_media_group(
+                chat_id=self.channel_id,
+                media=media_list,
+            )
+            return [m.message_id for m in messages]
+        except TelegramError as e:
+            logger.error("Failed to send media group to Telegram: %s", e)
             return None
 
     @staticmethod
