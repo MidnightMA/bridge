@@ -259,7 +259,6 @@ class BaleClient:
             )
 
         logger.info("Received message type that was not recognized as text, photo, or video.")
-        self._log_media_structure(message)
 
         return NormalizedMessage(
             message_id=msg_id,
@@ -267,261 +266,168 @@ class BaleClient:
             msg_type=MessageType.UNSUPPORTED,
         )
 
-    def _log_media_structure(self, message: Message) -> None:
-        """Log key attributes of incoming message to inspect media and forwarded content."""
-        info = {}
-        for key in dir(message):
-            if key.startswith("_"):
-                continue
-            try:
-                val = getattr(message, key, None)
-                if val is not None and not callable(val):
-                    info[key] = f"{type(val).__name__}: {str(val)[:150]}"
-            except Exception:
-                pass
-        logger.info("Full message structure dump: %s", info)
+    @classmethod
+    def _find_documents_and_media(cls, obj: Any, max_depth: int = 4) -> list[tuple[Any, Any, Any]]:
+        """
+        Recursively search obj (message, content, replied_to, quoted_replied_to)
+        for DocumentMessage or Media objects containing file_id and access_hash.
+        Returns list of tuples: (doc_object, file_id, access_hash)
+        """
+        results = []
+        visited = set()
+
+        def _walk(current: Any, depth: int):
+            if current is None or depth > max_depth or id(current) in visited:
+                return
+            visited.add(id(current))
+
+            file_id = getattr(current, "file_id", None)
+            access_hash = getattr(current, "access_hash", None)
+            if file_id is not None and access_hash is not None:
+                results.append((current, file_id, access_hash))
+
+            attrs_to_check = (
+                "document", "photo", "photos", "video", "content",
+                "replied_to", "quoted_replied_to", "previous_message",
+                "message", "media", "attachment", "file"
+            )
+            for attr in attrs_to_check:
+                val = getattr(current, attr, None)
+                if val is not None:
+                    if isinstance(val, (list, tuple)):
+                        for item in val:
+                            _walk(item, depth + 1)
+                    else:
+                        _walk(val, depth + 1)
+
+        _walk(obj, 0)
+        return results
 
     @classmethod
     def _is_photo(cls, message: Message) -> bool:
-        """Check if message or its forwarded content contains a photo."""
-        if getattr(message, "photo", None) or getattr(message, "photos", None):
-            return True
-
-        content = getattr(message, "content", None)
-        if content:
-            if getattr(content, "photo", None) or getattr(content, "photos", None):
-                return True
-            nested_msg = getattr(content, "message", None) or getattr(content, "forwarded_message", None) or getattr(content, "forward", None)
-            if nested_msg and cls._is_photo(nested_msg):
-                return True
-
-        for wrapper_name in ("media", "attachment", "forward", "forward_from", "forward_header", "fwd_from", "reply_to_message"):
-            wrapper = getattr(message, wrapper_name, None)
-            if wrapper:
-                if getattr(wrapper, "photo", None) or getattr(wrapper, "photos", None):
-                    return True
-                if getattr(wrapper, "type", "") in ("photo", "image"):
-                    return True
-                sub_msg = getattr(wrapper, "message", None)
-                if sub_msg and cls._is_photo(sub_msg):
-                    return True
-
-        doc = (
-            getattr(message, "document", None)
-            or getattr(message, "file", None)
-            or getattr(getattr(message, "content", None), "document", None)
-            or getattr(getattr(message, "content", None), "file", None)
-        )
-        if doc:
-            mime = str(getattr(doc, "mime_type", "") or getattr(doc, "mimetype", "") or "").lower()
-            name = str(getattr(doc, "file_name", "") or getattr(doc, "name", "") or "").lower()
+        """Check if message or its nested/forwarded content contains a photo."""
+        docs = cls._find_documents_and_media(message)
+        for doc_obj, _, _ in docs:
+            mime = str(getattr(doc_obj, "mime_type", "") or getattr(doc_obj, "mimetype", "") or "").lower()
+            name = str(getattr(doc_obj, "file_name", "") or getattr(doc_obj, "name", "") or "").lower()
             if mime.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic")):
                 return True
 
-        msg_type = str(getattr(message, "content_type", "") or getattr(message, "type", "")).lower()
-        if "photo" in msg_type or "image" in msg_type:
+        msg_str = str(message).lower()
+        if "documentmessage" in msg_str and ("image/" in msg_str or ".jpg" in msg_str or ".png" in msg_str or ".jpeg" in msg_str):
             return True
 
         return False
 
     @classmethod
     def _is_video(cls, message: Message) -> bool:
-        """Check if message or its forwarded content contains a video."""
-        if getattr(message, "video", None) or getattr(message, "animation", None):
-            return True
-
-        content = getattr(message, "content", None)
-        if content:
-            if getattr(content, "video", None) or getattr(content, "animation", None):
-                return True
-            nested_msg = getattr(content, "message", None) or getattr(content, "forwarded_message", None) or getattr(content, "forward", None)
-            if nested_msg and cls._is_video(nested_msg):
-                return True
-
-        for wrapper_name in ("media", "attachment", "forward", "forward_from", "forward_header", "fwd_from", "reply_to_message"):
-            wrapper = getattr(message, wrapper_name, None)
-            if wrapper:
-                if getattr(wrapper, "video", None) or getattr(wrapper, "animation", None):
-                    return True
-                if getattr(wrapper, "type", "") in ("video", "animation"):
-                    return True
-                sub_msg = getattr(wrapper, "message", None)
-                if sub_msg and cls._is_video(sub_msg):
-                    return True
-
-        doc = (
-            getattr(message, "document", None)
-            or getattr(message, "file", None)
-            or getattr(getattr(message, "content", None), "document", None)
-            or getattr(getattr(message, "content", None), "file", None)
-        )
-        if doc:
-            mime = str(getattr(doc, "mime_type", "") or getattr(doc, "mimetype", "") or "").lower()
-            name = str(getattr(doc, "file_name", "") or getattr(doc, "name", "") or "").lower()
+        """Check if message or its nested/forwarded content contains a video."""
+        docs = cls._find_documents_and_media(message)
+        for doc_obj, _, _ in docs:
+            mime = str(getattr(doc_obj, "mime_type", "") or getattr(doc_obj, "mimetype", "") or "").lower()
+            name = str(getattr(doc_obj, "file_name", "") or getattr(doc_obj, "name", "") or "").lower()
             if mime.startswith("video/") or name.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
                 return True
 
-        msg_type = str(getattr(message, "content_type", "") or getattr(message, "type", "")).lower()
-        if "video" in msg_type or "animation" in msg_type:
+        msg_str = str(message).lower()
+        if "documentmessage" in msg_str and ("video/" in msg_str or ".mp4" in msg_str or ".mov" in msg_str):
             return True
 
         return False
 
-    @staticmethod
-    def _is_plain_text(message: Message) -> bool:
+    @classmethod
+    def _is_plain_text(cls, message: Message) -> bool:
         """Check if message is plain text without media attachments."""
-        media_attrs = (
-            "photo", "photos", "video", "sticker", "voice", "audio",
-            "document", "file", "media", "attachment", "location",
-            "contact", "poll", "gift"
-        )
-        for attr in media_attrs:
-            if getattr(message, attr, None):
-                return False
-            if hasattr(message, "content") and getattr(message.content, attr, None):
-                return False
+        if cls._is_photo(message) or cls._is_video(message):
+            return False
 
-        text = getattr(message, "text", None) or getattr(message, "caption", None)
+        text = cls._extract_text(message)
         return bool(text and text.strip())
 
     @classmethod
-    def _extract_text(cls, message: Message) -> str:
-        """Extract text or caption from message or nested forwarded message."""
-        text = getattr(message, "caption", None) or getattr(message, "text", None)
+    def _extract_text(cls, obj: Any, depth: int = 0) -> str:
+        """Extract text or caption from message or nested forwarded/replied messages."""
+        if obj is None or depth > 4:
+            return ""
 
-        if not text and hasattr(message, "content") and message.content:
-            content = message.content
-            text = getattr(content, "caption", None) or getattr(content, "text", None)
-            if not text and hasattr(content, "message") and content.message:
-                text = cls._extract_text(content.message)
+        text = getattr(obj, "caption", None) or getattr(obj, "text", None)
+        if text and str(text).strip():
+            return str(text).strip()
 
-        if not text:
-            for wrapper in ("media", "attachment", "forward", "forward_header", "reply_to_message"):
-                obj = getattr(message, wrapper, None)
-                if obj:
-                    text = getattr(obj, "caption", None) or getattr(obj, "text", None)
-                    if text:
-                        break
+        for attr in ("content", "replied_to", "quoted_replied_to", "message"):
+            child = getattr(obj, attr, None)
+            if child:
+                res = cls._extract_text(child, depth + 1)
+                if res:
+                    return res
 
-        return text.strip() if text else ""
+        return ""
 
     async def _download_media(self, message: Message, media_kind: str) -> Optional[bytes]:
-        """Download media file into memory using fallbacks and log exact diagnostic errors."""
-        candidates = []
+        """Download media file into memory using file_id and access_hash."""
+        found_media = self._find_documents_and_media(message)
+        if not found_media:
+            logger.error("No valid media objects with file_id and access_hash found in message.")
+            return None
 
-        client_methods = [m for m in dir(self.client) if any(k in m for k in ("download", "file", "media", "get_file"))]
-        logger.info("Available client download methods in aiobale: %s", client_methods)
+        for doc_obj, file_id, access_hash in found_media:
+            logger.info("Downloading %s using file_id=%s and access_hash=%s", media_kind, file_id, access_hash)
 
-        self._log_media_structure(message)
-
-        # 1. Direct photo objects
-        photo_attr = (
-            getattr(message, "photo", None)
-            or getattr(message, "photos", None)
-            or getattr(getattr(message, "content", None), "photo", None)
-            or getattr(getattr(message, "content", None), "photos", None)
-            or getattr(getattr(message, "media", None), "photo", None)
-        )
-        if photo_attr:
-            if isinstance(photo_attr, (list, tuple)) and len(photo_attr) > 0:
-                candidates.append(photo_attr[-1])
-                candidates.extend(photo_attr)
-            else:
-                candidates.append(photo_attr)
-
-        # 2. Video objects
-        video_attr = (
-            getattr(message, "video", None)
-            or getattr(getattr(message, "content", None), "video", None)
-            or getattr(getattr(message, "media", None), "video", None)
-        )
-        if video_attr:
-            candidates.append(video_attr)
-
-        # 3. Document or file attribute
-        doc_attr = (
-            getattr(message, "document", None)
-            or getattr(message, "file", None)
-            or getattr(getattr(message, "content", None), "document", None)
-            or getattr(getattr(message, "content", None), "file", None)
-        )
-        if doc_attr:
-            candidates.append(doc_attr)
-
-        # 4. Message object itself
-        candidates.append(message)
-
-        for idx, target in enumerate(candidates):
-            target_type = type(target).__name__
-
-            # Method 1: target.download()
-            if hasattr(target, "download") and callable(getattr(target, "download")):
-                try:
-                    res = await target.download()
-                    data = self._resolve_download_result(res)
-                    if data:
-                        logger.info("Successfully downloaded media using candidate[%d] (%s).download()", idx, target_type)
-                        return data
-                except Exception as e:
-                    logger.info("Strategy 1 candidate[%d] (%s).download() failed: %s", idx, target_type, e)
-
-            # Method 2: client.download_media(target)
-            if hasattr(self.client, "download_media") and callable(getattr(self.client, "download_media")):
-                try:
-                    res = await self.client.download_media(target)
-                    data = self._resolve_download_result(res)
-                    if data:
-                        logger.info("Successfully downloaded media using client.download_media(candidate[%d] %s)", idx, target_type)
-                        return data
-                except Exception as e:
-                    logger.info("Strategy 2 client.download_media(%s) failed: %s", target_type, e)
-
-            # Method 3: client.download_file(...)
+            # Strategy 1: client.download_file(file_id, access_hash)
             if hasattr(self.client, "download_file") and callable(getattr(self.client, "download_file")):
-                for file_arg in (target, getattr(target, "file_id", None), getattr(target, "file_location", None), getattr(target, "id", None)):
-                    if file_arg is None:
-                        continue
-                    try:
-                        res = await self.client.download_file(file_arg)
-                        data = self._resolve_download_result(res)
-                        if data:
-                            logger.info("Successfully downloaded media using client.download_file(%s)", type(file_arg).__name__)
-                            return data
-                    except Exception as e:
-                        logger.info("Strategy 3 client.download_file(%s) failed: %s", type(file_arg).__name__, e)
-
-            # Method 4: client.download(...)
-            if hasattr(self.client, "download") and callable(getattr(self.client, "download")):
                 try:
-                    res = await self.client.download(target)
+                    res = await self.client.download_file(file_id, access_hash)
                     data = self._resolve_download_result(res)
                     if data:
-                        logger.info("Successfully downloaded media using client.download(%s)", target_type)
                         return data
                 except Exception as e:
-                    logger.info("Strategy 4 client.download(%s) failed: %s", target_type, e)
+                    logger.debug("download_file(file_id, access_hash) failed: %s", e)
 
-            # Method 5: client.get_file()
+                try:
+                    res = await self.client.download_file(file_id=file_id, access_hash=access_hash)
+                    data = self._resolve_download_result(res)
+                    if data:
+                        return data
+                except Exception as e:
+                    logger.debug("download_file(kwargs) failed: %s", e)
+
+            # Strategy 2: client.get_file(file_id, access_hash)
             if hasattr(self.client, "get_file") and callable(getattr(self.client, "get_file")):
                 try:
-                    file_obj = await self.client.get_file(getattr(target, "file_id", target))
-                    if hasattr(file_obj, "download") and callable(getattr(file_obj, "download")):
+                    file_obj = await self.client.get_file(file_id, access_hash)
+                    data = self._resolve_download_result(file_obj)
+                    if not data and hasattr(file_obj, "download") and callable(getattr(file_obj, "download")):
                         res = await file_obj.download()
                         data = self._resolve_download_result(res)
-                        if data:
-                            logger.info("Successfully downloaded media via client.get_file().download()")
-                            return data
+                    if data:
+                        return data
                 except Exception as e:
-                    logger.info("Strategy 5 client.get_file() failed: %s", e)
+                    logger.debug("get_file(file_id, access_hash) failed: %s", e)
 
-        logger.error("Could not download %s media: all download strategies failed.", media_kind)
+            # Strategy 3: doc_obj.download()
+            if hasattr(doc_obj, "download") and callable(getattr(doc_obj, "download")):
+                try:
+                    res = await doc_obj.download()
+                    data = self._resolve_download_result(res)
+                    if data:
+                        return data
+                except Exception as e:
+                    logger.debug("doc_obj.download() failed: %s", e)
+
+        logger.error("Could not download %s media: all download methods failed.", media_kind)
         return None
 
     @staticmethod
-    def _resolve_download_result(result: Union[bytes, str, Path]) -> Optional[bytes]:
-        """Convert download result (file path or bytes) to byte array."""
+    def _resolve_download_result(result: Any) -> Optional[bytes]:
+        """Convert download result (file path, bytes, or buffer) to byte array."""
         if isinstance(result, bytes):
             return result
+        if hasattr(result, "getvalue") and callable(getattr(result, "getvalue")):
+            return result.getvalue()
+        if hasattr(result, "read") and callable(getattr(result, "read")):
+            data = result.read()
+            if isinstance(data, bytes):
+                return data
         if isinstance(result, (str, Path)) and os.path.exists(result):
             with open(result, "rb") as f:
                 data = f.read()
