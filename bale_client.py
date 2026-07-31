@@ -35,6 +35,7 @@ class NormalizedMessage:
     text: Optional[str] = None
     caption: Optional[str] = None
     media_bytes: Optional[bytes] = None
+    grouped_id: Optional[Union[str, int]] = None
 
 
 MessageHandlerCallback = Callable[[NormalizedMessage], Awaitable[None]]
@@ -207,9 +208,21 @@ class BaleClient:
 
         return clean_target and clean_peer and clean_target == clean_peer
 
+    @staticmethod
+    def _extract_grouped_id(message: Message) -> Optional[Union[str, int]]:
+        """Extract album / media group ID if present."""
+        return (
+            getattr(message, "grouped_id", None)
+            or getattr(message, "media_group_id", None)
+            or getattr(message, "group_id", None)
+            or getattr(getattr(message, "content", None), "grouped_id", None)
+            or getattr(getattr(message, "content", None), "media_group_id", None)
+        )
+
     async def _normalize_message(self, message: Message, peer_id: str) -> NormalizedMessage:
         """Detect supported message types and download original media."""
         msg_id = getattr(message, "id", getattr(message, "message_id", 0))
+        grouped_id = self._extract_grouped_id(message)
 
         # Photo
         if self._is_photo(message):
@@ -232,6 +245,7 @@ class BaleClient:
                 msg_type=MessageType.PHOTO if media_bytes else MessageType.UNSUPPORTED,
                 caption=caption,
                 media_bytes=media_bytes,
+                grouped_id=grouped_id,
             )
 
         # Video
@@ -255,6 +269,7 @@ class BaleClient:
                 msg_type=MessageType.VIDEO if media_bytes else MessageType.UNSUPPORTED,
                 caption=caption,
                 media_bytes=media_bytes,
+                grouped_id=grouped_id,
             )
 
         # Plain Text
@@ -279,8 +294,7 @@ class BaleClient:
     @classmethod
     def _find_documents_and_media(cls, obj: Any, max_depth: int = 4) -> list[tuple[Any, Any, Any]]:
         """
-        Recursively search obj (message, content, replied_to, quoted_replied_to)
-        for DocumentMessage or Media objects containing file_id and access_hash.
+        Recursively search obj for DocumentMessage or Media objects containing file_id and access_hash.
         Returns list of tuples: (doc_object, file_id, access_hash)
         """
         results = []
@@ -366,7 +380,6 @@ class BaleClient:
                 return None
             return cleaned
 
-        # Unroll aiobale object wrappers (Caption, TextContent, FormattedText, etc.)
         for inner_attr in ("content", "text", "value", "raw_text", "caption", "message"):
             inner_val = getattr(val, inner_attr, None)
             if inner_val is not None:
@@ -382,14 +395,12 @@ class BaleClient:
         if obj is None or depth > 5:
             return ""
 
-        # Direct attribute checks
         for text_attr in ("caption", "text", "description"):
             val = getattr(obj, text_attr, None)
             extracted = cls._get_str_val(val)
             if extracted:
                 return extracted
 
-        # Child attributes to traverse
         child_attrs = (
             "content", "document", "photo", "photos", "video",
             "media", "attachment", "file", "replied_to",
@@ -420,7 +431,6 @@ class BaleClient:
         for doc_obj, file_id, access_hash in found_media:
             logger.info("Downloading %s using file_id=%s and access_hash=%s", media_kind, file_id, access_hash)
 
-            # Strategy 1: client.download_file(file_id, access_hash)
             if hasattr(self.client, "download_file") and callable(getattr(self.client, "download_file")):
                 try:
                     res = await self.client.download_file(file_id, access_hash)
@@ -438,7 +448,6 @@ class BaleClient:
                 except Exception as e:
                     logger.debug("download_file(kwargs) failed: %s", e)
 
-            # Strategy 2: client.get_file(file_id, access_hash)
             if hasattr(self.client, "get_file") and callable(getattr(self.client, "get_file")):
                 try:
                     file_obj = await self.client.get_file(file_id, access_hash)
@@ -451,7 +460,6 @@ class BaleClient:
                 except Exception as e:
                     logger.debug("get_file(file_id, access_hash) failed: %s", e)
 
-            # Strategy 3: doc_obj.download()
             if hasattr(doc_obj, "download") and callable(getattr(doc_obj, "download")):
                 try:
                     res = await doc_obj.download()

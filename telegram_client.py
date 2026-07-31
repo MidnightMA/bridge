@@ -1,11 +1,11 @@
 """
 Telegram client wrapper using python-telegram-bot.
-Handles uploading text, photo, and video messages to Telegram channel with proxy and timeout support.
+Handles uploading text, photo, video, and album media groups to Telegram channel.
 """
 
 import logging
-from typing import Optional, Union
-from telegram import Bot
+from typing import Any, Optional, Union
+from telegram import Bot, InputMediaPhoto, InputMediaVideo
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
@@ -26,18 +26,9 @@ class TelegramClient:
         connect_timeout: float = 30.0,
         read_timeout: float = 60.0,
     ) -> None:
-        """
-        Initialize Telegram client.
-
-        :param token: Bot API token from @BotFather
-        :param channel_id: Target channel ID or username
-        :param proxy_url: Optional HTTP/SOCKS5 proxy URL (e.g. http://127.0.0.1:8080 or socks5://127.0.0.1:1080)
-        :param connect_timeout: HTTP connect timeout in seconds
-        :param read_timeout: HTTP read timeout in seconds
-        """
+        """Initialize Telegram client."""
         self.channel_id = channel_id
 
-        # Build custom request client with increased timeouts and optional proxy
         request_kwargs = {
             "connect_timeout": connect_timeout,
             "read_timeout": read_timeout,
@@ -119,6 +110,75 @@ class TelegramClient:
         except TelegramError as e:
             logger.error("Telegram error uploading video: %s", e)
             return None
+
+    async def send_media_group_message(self, items: list[Any]) -> bool:
+        """
+        Send a list of photo/video items as a Telegram Media Group (Album).
+
+        :param items: List of NormalizedMessage objects
+        :return: True if sent successfully, False otherwise
+        """
+        if not items:
+            return False
+
+        if len(items) == 1:
+            item = items[0]
+            if item.msg_type.name == "PHOTO":
+                return bool(await self.send_photo_message(item.media_bytes, item.caption))
+            elif item.msg_type.name == "VIDEO":
+                return bool(await self.send_video_message(item.media_bytes, item.caption))
+            return False
+
+        success_all = True
+
+        # Telegram limits media group size to 10 items
+        for i in range(0, len(items), 10):
+            chunk = items[i:i + 10]
+            if len(chunk) == 1:
+                item = chunk[0]
+                if item.msg_type.name == "PHOTO":
+                    res = await self.send_photo_message(item.media_bytes, item.caption)
+                elif item.msg_type.name == "VIDEO":
+                    res = await self.send_video_message(item.media_bytes, item.caption)
+                else:
+                    res = None
+                if not res:
+                    success_all = False
+            else:
+                res = await self._send_single_media_group(chunk)
+                if not res:
+                    success_all = False
+
+        return success_all
+
+    async def _send_single_media_group(self, chunk: list[Any]) -> bool:
+        """Helper to upload a chunk of max 10 items as a single media group."""
+        media_list = []
+        for item in chunk:
+            formatted_caption = self._format_caption(item.caption)
+
+            if item.msg_type.name == "PHOTO" and item.media_bytes:
+                media_list.append(
+                    InputMediaPhoto(media=item.media_bytes, caption=formatted_caption)
+                )
+            elif item.msg_type.name == "VIDEO" and item.media_bytes:
+                media_list.append(
+                    InputMediaVideo(media=item.media_bytes, caption=formatted_caption)
+                )
+
+        if not media_list:
+            return False
+
+        try:
+            await self.bot.send_media_group(
+                chat_id=self.channel_id,
+                media=media_list,
+            )
+            logger.info("Forwarded album (%d media items) to Telegram successfully", len(media_list))
+            return True
+        except TelegramError as e:
+            logger.error("Failed to send media group to Telegram: %s", e)
+            return False
 
     @staticmethod
     def _format_caption(caption: Optional[str]) -> Optional[str]:
