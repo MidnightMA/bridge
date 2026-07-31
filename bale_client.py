@@ -10,7 +10,6 @@ import inspect
 import logging
 import os
 from pathlib import Path
-import re
 from typing import Callable, Awaitable, Optional, Union, Any
 
 from aiobale import Client, Dispatcher
@@ -36,7 +35,6 @@ class NormalizedMessage:
     text: Optional[str] = None
     caption: Optional[str] = None
     media_bytes: Optional[bytes] = None
-    media_group_id: Optional[str] = None
 
 
 MessageHandlerCallback = Callable[[NormalizedMessage], Awaitable[None]]
@@ -212,14 +210,15 @@ class BaleClient:
     async def _normalize_message(self, message: Message, peer_id: str) -> NormalizedMessage:
         """Detect supported message types and download original media."""
         msg_id = getattr(message, "id", getattr(message, "message_id", 0))
-        media_group_id = self._extract_media_group_id(message)
 
         # Photo
         if self._is_photo(message):
             logger.info("New photo")
-            caption = self._extract_text(message)
+            caption = self._extract_text(message) or None
             if caption:
                 logger.info("Extracted photo caption: '%s'", caption)
+            else:
+                logger.info("No caption found for this photo.")
 
             media_bytes = await self._download_media(message, "photo")
             if media_bytes:
@@ -233,15 +232,16 @@ class BaleClient:
                 msg_type=MessageType.PHOTO if media_bytes else MessageType.UNSUPPORTED,
                 caption=caption,
                 media_bytes=media_bytes,
-                media_group_id=media_group_id,
             )
 
         # Video
         if self._is_video(message):
             logger.info("New video")
-            caption = self._extract_text(message)
+            caption = self._extract_text(message) or None
             if caption:
                 logger.info("Extracted video caption: '%s'", caption)
+            else:
+                logger.info("No caption found for this video.")
 
             media_bytes = await self._download_media(message, "video")
             if media_bytes:
@@ -255,13 +255,12 @@ class BaleClient:
                 msg_type=MessageType.VIDEO if media_bytes else MessageType.UNSUPPORTED,
                 caption=caption,
                 media_bytes=media_bytes,
-                media_group_id=media_group_id,
             )
 
         # Plain Text
         if self._is_plain_text(message):
             logger.info("New text message")
-            text = self._extract_text(message)
+            text = self._extract_text(message) or None
             return NormalizedMessage(
                 message_id=msg_id,
                 peer_id=peer_id,
@@ -277,22 +276,13 @@ class BaleClient:
             msg_type=MessageType.UNSUPPORTED,
         )
 
-    @staticmethod
-    def _extract_media_group_id(message: Message) -> Optional[str]:
-        """Extract album or media group ID if present."""
-        for attr in ("media_group_id", "grouped_id", "album_id", "group_id"):
-            val = getattr(message, attr, None)
-            if val is not None:
-                return str(val)
-            if hasattr(message, "content"):
-                val = getattr(message.content, attr, None)
-                if val is not None:
-                    return str(val)
-        return None
-
     @classmethod
     def _find_documents_and_media(cls, obj: Any, max_depth: int = 4) -> list[tuple[Any, Any, Any]]:
-        """Recursively search obj for DocumentMessage or Media objects containing file_id and access_hash."""
+        """
+        Recursively search obj (message, content, replied_to, quoted_replied_to)
+        for DocumentMessage or Media objects containing file_id and access_hash.
+        Returns list of tuples: (doc_object, file_id, access_hash)
+        """
         results = []
         visited = set()
 
@@ -365,39 +355,26 @@ class BaleClient:
         return bool(text and text.strip())
 
     @classmethod
-    def _clean_text_val(cls, val: Any) -> Optional[str]:
-        """Extract raw string value from attribute or content object without string artifacts."""
+    def _get_str_val(cls, val: Any) -> Optional[str]:
+        """Safely extract plain string from string or aiobale text/caption object."""
         if val is None:
             return None
 
         if isinstance(val, str):
-            s = val.strip()
-            if not s or s == "None" or s.startswith("content=None"):
+            cleaned = val.strip()
+            if not cleaned or cleaned == "None" or cleaned.startswith("content=None"):
                 return None
-            return s
+            return cleaned
 
-        # Inspect properties of content/text objects
-        for attr in ("content", "text", "caption", "value", "description"):
-            inner = getattr(val, attr, None)
-            if isinstance(inner, str) and inner.strip():
-                s = inner.strip()
-                if s and s != "None":
-                    return s
-
-        s = str(val).strip()
-        if not s or s == "None" or "content=None" in s:
-            return None
-
-        # Regex extract if stringified as content='...'
-        if "content=" in s:
-            m = re.search(r"content=['\"](.*?)['\"]", s)
-            if m and m.group(1):
-                res = m.group(1).strip()
-                if res and res != "None":
+        # Unroll aiobale object wrappers (Caption, TextContent, FormattedText, etc.)
+        for inner_attr in ("content", "text", "value", "raw_text", "caption", "message"):
+            inner_val = getattr(val, inner_attr, None)
+            if inner_val is not None:
+                res = cls._get_str_val(inner_val)
+                if res:
                     return res
-            return None
 
-        return s
+        return None
 
     @classmethod
     def _extract_text(cls, obj: Any, depth: int = 0) -> str:
@@ -405,12 +382,14 @@ class BaleClient:
         if obj is None or depth > 5:
             return ""
 
+        # Direct attribute checks
         for text_attr in ("caption", "text", "description"):
             val = getattr(obj, text_attr, None)
-            cleaned = cls._clean_text_val(val)
-            if cleaned:
-                return cleaned
+            extracted = cls._get_str_val(val)
+            if extracted:
+                return extracted
 
+        # Child attributes to traverse
         child_attrs = (
             "content", "document", "photo", "photos", "video",
             "media", "attachment", "file", "replied_to",

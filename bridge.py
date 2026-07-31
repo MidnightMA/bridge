@@ -1,12 +1,11 @@
 """
 Bridge module routing messages from Bale client to Telegram client.
-Supports single messages, album grouping (media groups), and deduplication.
+Prevents duplicate posts using a bounded in-memory cache.
 """
 
-import asyncio
 from collections import deque
 import logging
-from typing import Dict, List, Set, Union
+from typing import Set, Union
 
 from bale_client import BaleClient, NormalizedMessage, MessageType
 from telegram_client import TelegramClient
@@ -14,11 +13,10 @@ from telegram_client import TelegramClient
 logger = logging.getLogger(__name__)
 
 MAX_DEDUP_SIZE = 5000
-ALBUM_DEBOUNCE_DELAY = 1.2  # Seconds window to accumulate album items
 
 
 class MessageBridge:
-    """Connects Bale event updates to Telegram publishing logic with album support."""
+    """Connects Bale event updates to Telegram publishing logic."""
 
     def __init__(self, bale_client: BaleClient, telegram_client: TelegramClient) -> None:
         """
@@ -32,10 +30,6 @@ class MessageBridge:
 
         self._processed_set: Set[Union[str, int]] = set()
         self._processed_queue: deque = deque()
-
-        # Album debouncer buffer
-        self._album_buffers: Dict[str, List[NormalizedMessage]] = {}
-        self._album_tasks: Dict[str, asyncio.Task] = {}
 
         # Connect message callback
         self.bale_client.set_message_handler(self.on_bale_message)
@@ -68,85 +62,31 @@ class MessageBridge:
             logger.info("Skipping duplicate message (ID: %s)", msg_id)
             return
 
-        # Plain text messages
+        success = False
+
         if msg.msg_type == MessageType.TEXT and msg.text:
             tg_id = await self.telegram_client.send_text_message(text=msg.text)
             if tg_id:
-                self._mark_processed(msg_id)
-                logger.info("Forwarded text successfully")
-            return
+                success = True
 
-        # Media items (PHOTO or VIDEO) -> Album Debouncer
-        if msg.msg_type in (MessageType.PHOTO, MessageType.VIDEO) and msg.media_bytes:
-            await self._enqueue_media_item(msg)
+        elif msg.msg_type == MessageType.PHOTO and msg.media_bytes:
+            tg_id = await self.telegram_client.send_photo_message(
+                photo_bytes=msg.media_bytes,
+                caption=msg.caption,
+            )
+            if tg_id:
+                success = True
 
-    async def _enqueue_media_item(self, msg: NormalizedMessage) -> None:
-        """Buffer media item to group albums or send individually."""
-        group_key = msg.media_group_id or f"peer_{msg.peer_id}"
+        elif msg.msg_type == MessageType.VIDEO and msg.media_bytes:
+            tg_id = await self.telegram_client.send_video_message(
+                video_bytes=msg.media_bytes,
+                caption=msg.caption,
+            )
+            if tg_id:
+                success = True
 
-        if group_key not in self._album_buffers:
-            self._album_buffers[group_key] = []
-
-        self._album_buffers[group_key].append(msg)
-
-        # Reset timer window for this album
-        if group_key in self._album_tasks and not self._album_tasks[group_key].done():
-            self._album_tasks[group_key].cancel()
-
-        self._album_tasks[group_key] = asyncio.create_task(
-            self._flush_album_after_delay(group_key)
-        )
-
-    async def _flush_album_after_delay(self, group_key: str) -> None:
-        """Wait debounce window, then flush buffered media items to Telegram."""
-        try:
-            await asyncio.sleep(ALBUM_DEBOUNCE_DELAY)
-        except asyncio.CancelledError:
-            return
-
-        items = self._album_buffers.pop(group_key, [])
-        self._album_tasks.pop(group_key, None)
-
-        if not items:
-            return
-
-        media_items = [
-            {
-                "type": item.msg_type,
-                "bytes": item.media_bytes,
-                "caption": item.caption,
-                "msg_id": item.message_id,
-            }
-            for item in items
-        ]
-
-        if len(media_items) == 1:
-            # Single photo or video
-            single = media_items[0]
-            success = False
-
-            if single["type"] == MessageType.PHOTO:
-                tg_id = await self.telegram_client.send_photo_message(
-                    photo_bytes=single["bytes"],
-                    caption=single["caption"],
-                )
-                if tg_id:
-                    success = True
-            elif single["type"] == MessageType.VIDEO:
-                tg_id = await self.telegram_client.send_video_message(
-                    video_bytes=single["bytes"],
-                    caption=single["caption"],
-                )
-                if tg_id:
-                    success = True
-
-            if success:
-                self._mark_processed(single["msg_id"])
-                logger.info("Forwarded single media successfully")
+        if success:
+            self._mark_processed(msg_id)
+            logger.info("Forwarded successfully")
         else:
-            # Album (media group)
-            tg_ids = await self.telegram_client.send_media_group(media_items)
-            if tg_ids:
-                for item in items:
-                    self._mark_processed(item.message_id)
-                logger.info("Forwarded album (%d media items) successfully", len(media_items))
+            logger.error("Failed to forward message ID %s to Telegram.", msg_id)
