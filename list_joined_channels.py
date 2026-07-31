@@ -12,7 +12,6 @@ async def main() -> None:
     print("Loading project configuration...")
     config = Config.load()
 
-    # Pass saved session credentials
     sig = inspect.signature(Client.__init__)
     params = sig.parameters
 
@@ -28,7 +27,11 @@ async def main() -> None:
     client = Client(**client_kwargs)
 
     print("Connecting to Bale...")
-    await client.connect()
+    if hasattr(client, "start") and callable(getattr(client, "start")):
+        await client.start()
+    elif hasattr(client, "connect") and callable(getattr(client, "connect")):
+        await client.connect()
+
     print("Connected successfully!\n")
 
     print("=" * 65)
@@ -37,27 +40,28 @@ async def main() -> None:
 
     dialogs = []
 
-    # Fetch dialogs/chats using available client methods
-    if hasattr(client, "get_dialogs") and callable(getattr(client, "get_dialogs")):
-        try:
-            dialogs = await client.get_dialogs()
-        except Exception as e:
-            print(f"Notice: get_dialogs() error: {e}")
-
-    if not dialogs and hasattr(client, "get_chats") and callable(getattr(client, "get_chats")):
-        try:
-            dialogs = await client.get_chats()
-        except Exception as e:
-            print(f"Notice: get_chats() error: {e}")
+    # Try available dialog retrieval methods in aiobale
+    dialog_method_names = ["get_dialogs", "get_chats", "get_user_dialogs", "get_peers", "fetch_dialogs"]
+    for method_name in dialog_method_names:
+        if hasattr(client, method_name) and callable(getattr(client, method_name)):
+            try:
+                method = getattr(client, method_name)
+                res = await method() if inspect.iscoroutinefunction(method) else method()
+                if res:
+                    dialogs = list(res)
+                    print(f"[+] Retrieved dialogs using client.{method_name}()\n")
+                    break
+            except Exception as e:
+                print(f"Notice: client.{method_name}() error: {e}")
 
     if dialogs:
         count = 0
         for item in dialogs:
             chat = getattr(item, "chat", item)
             chat_id = getattr(chat, "id", getattr(chat, "peer_id", "N/A"))
-            title = getattr(chat, "title", getattr(chat, "first_name", "Unknown Title"))
-            chat_type = getattr(chat, "type", "Chat")
-            username = getattr(chat, "username", "")
+            title = getattr(chat, "title", getattr(chat, "first_name", getattr(item, "title", "Unknown Title")))
+            chat_type = getattr(chat, "type", getattr(item, "type", "Chat"))
+            username = getattr(chat, "username", getattr(item, "username", ""))
 
             count += 1
             username_display = f" (@{username})" if username else ""
@@ -65,11 +69,13 @@ async def main() -> None:
             print(f"    └─ Channel ID for .env : {chat_id}\n")
     else:
         print("Could not retrieve dialog list automatically.")
-        print("You can run `python check_channels.py` and post a test message in your channel to catch its ID live.\n")
+        print("Run `python check_channels.py` and post a test message in your channel to view its ID live.\n")
 
     print("=" * 65)
 
-    if hasattr(client, "disconnect") and callable(getattr(client, "disconnect")):
+    if hasattr(client, "stop") and callable(getattr(client, "stop")):
+        await client.stop()
+    elif hasattr(client, "disconnect") and callable(getattr(client, "disconnect")):
         await client.disconnect()
 
 
