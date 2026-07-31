@@ -1,6 +1,5 @@
 """
-Script to list all channels, groups, and chats you have joined on Bale with their IDs
-by reflecting on aiobale methods and session storage.
+Script to list all joined Bale channels and chats using aiobale's load_dialogs().
 """
 
 import asyncio
@@ -43,87 +42,68 @@ async def main() -> None:
 
     print("Connected successfully!\n")
 
-    print("=" * 65)
-    print("              INSPECTING AIOBALE CLIENT API                   ")
-    print("=" * 65)
-
-    # 1. Print all public methods on Client
-    public_methods = [
-        m for m in dir(client)
-        if not m.startswith("_") and callable(getattr(client, m))
-    ]
-    print(f"\n[+] Public methods available on aiobale.Client:\n{public_methods}\n")
-
-    # 2. Identify candidate methods that fetch chats/dialogs/peers
-    candidate_methods = [
-        m for m in dir(client)
-        if any(keyword in m.lower() for keyword in ("dialog", "chat", "peer", "channel", "group", "get", "fetch", "list"))
-        and callable(getattr(client, m))
-    ]
+    print("Fetching dialogs via client.load_dialogs()...\n")
 
     dialogs = []
+    try:
+        dialogs = await client.load_dialogs()
+    except Exception as e:
+        print(f"Error calling load_dialogs(): {e}")
 
-    # Attempt calling each candidate method
-    for method_name in candidate_methods:
-        if method_name in ("start", "stop", "connect", "disconnect", "download", "download_file", "upload_file", "send_message"):
-            continue
-        try:
-            method = getattr(client, method_name)
-            sig_m = inspect.signature(method)
-            kwargs = {}
-            if "limit" in sig_m.parameters:
-                kwargs["limit"] = 100
-
-            res = await method(**kwargs) if inspect.iscoroutinefunction(method) else method(**kwargs)
-            if res:
-                print(f"[✓] client.{method_name}() returned data: {type(res).__name__}")
-                if isinstance(res, (list, tuple, set)):
-                    dialogs.extend(res)
-                elif hasattr(res, "chats") or hasattr(res, "dialogs") or hasattr(res, "peers"):
-                    items = getattr(res, "chats", None) or getattr(res, "dialogs", None) or getattr(res, "peers", None)
-                    if items:
-                        dialogs.extend(items)
-        except Exception as e:
-            pass
-
-    # 3. Inspect internal storage or session objects
-    for storage_attr in ("storage", "_storage", "session", "_session", "db", "_db"):
-        st = getattr(client, storage_attr, None)
-        if st is not None:
-            for sub in ("chats", "peers", "dialogs", "channels", "_chats", "_peers"):
-                val = getattr(st, sub, None)
-                if val:
-                    print(f"[✓] Found {sub} in client.{storage_attr}")
-                    if isinstance(val, (dict, list, tuple)):
-                        dialogs.extend(val.values() if isinstance(val, dict) else val)
-
-    print("\n" + "=" * 65)
-    print("                     JOINED BALE CHANNELS LIST                 ")
-    print("=" * 65 + "\n")
+    print("=" * 70)
+    print("                 ALL JOINED BALE CHANNELS & CHATS              ")
+    print("=" * 70 + "\n")
 
     if dialogs:
-        seen = set()
-        count = 0
-        for item in dialogs:
-            chat = getattr(item, "chat", item)
-            chat_id = getattr(chat, "id", getattr(chat, "peer_id", getattr(item, "id", "N/A")))
+        for idx, d in enumerate(dialogs, 1):
+            # Inspect properties of dialog object
+            chat = getattr(d, "chat", d)
+            peer = getattr(d, "peer", None)
 
-            if chat_id in seen or chat_id == "N/A":
-                continue
-            seen.add(chat_id)
+            chat_id = (
+                getattr(chat, "id", None)
+                or getattr(d, "peer_id", None)
+                or getattr(d, "id", None)
+                or getattr(peer, "id", None)
+            )
 
-            title = getattr(chat, "title", getattr(chat, "first_name", getattr(item, "title", "Unknown Title")))
-            chat_type = getattr(chat, "type", getattr(item, "type", "Chat"))
-            username = getattr(chat, "username", getattr(item, "username", ""))
+            title = (
+                getattr(chat, "title", None)
+                or getattr(chat, "first_name", None)
+                or getattr(d, "title", None)
+                or getattr(d, "name", None)
+                or getattr(peer, "title", None)
+                or "Unknown Title"
+            )
 
-            count += 1
-            username_display = f" (@{username})" if username else ""
-            print(f"{count:02d}. [{str(chat_type).upper()}] {title}{username_display}")
-            print(f"    └─ Channel ID for .env : {chat_id}\n")
+            chat_type = (
+                getattr(chat, "type", None)
+                or getattr(d, "type", None)
+                or getattr(peer, "type", None)
+                or "Chat"
+            )
+
+            username = (
+                getattr(chat, "username", None)
+                or getattr(d, "username", None)
+                or getattr(peer, "username", None)
+            )
+
+            username_str = f" (@{username})" if username else ""
+            print(f"{idx:02d}. [{str(chat_type).upper()}] {title}{username_str}")
+            print(f"    ├─ Channel ID for .env : {chat_id}")
+
+            # Print non-private fields for full visibility
+            raw_attrs = {
+                k: getattr(d, k)
+                for k in dir(d)
+                if not k.startswith("_") and not callable(getattr(d, k))
+            }
+            print(f"    └─ Attributes : {raw_attrs}\n")
     else:
-        print("No dialogs returned by automated inspection methods.")
+        print("No dialogs returned by client.load_dialogs().")
 
-    print("=" * 65)
+    print("=" * 70)
 
     conn_task.cancel()
     try:
