@@ -224,14 +224,12 @@ class BaleClient:
         msg_id = getattr(message, "id", getattr(message, "message_id", 0))
         grouped_id = self._extract_grouped_id(message)
 
-        # Photo
+        # 1. Photo
         if self._is_photo(message):
             logger.info("New photo")
             caption = self._extract_text(message) or None
             if caption:
                 logger.info("Extracted photo caption: '%s'", caption)
-            else:
-                logger.info("No caption found for this photo.")
 
             media_bytes = await self._download_media(message, "photo")
             if media_bytes:
@@ -248,14 +246,12 @@ class BaleClient:
                 grouped_id=grouped_id,
             )
 
-        # Video
+        # 2. Video
         if self._is_video(message):
             logger.info("New video")
             caption = self._extract_text(message) or None
             if caption:
                 logger.info("Extracted video caption: '%s'", caption)
-            else:
-                logger.info("No caption found for this video.")
 
             media_bytes = await self._download_media(message, "video")
             if media_bytes:
@@ -272,7 +268,16 @@ class BaleClient:
                 grouped_id=grouped_id,
             )
 
-        # Plain Text
+        # 3. Check for generic Files / Documents / Stickers / Voice / Audio / Polls -> MUST IGNORE
+        if self._has_unsupported_media(message):
+            logger.info("Ignored unsupported message attachment (File/Document/Sticker/Voice/Poll/etc.)")
+            return NormalizedMessage(
+                message_id=msg_id,
+                peer_id=peer_id,
+                msg_type=MessageType.UNSUPPORTED,
+            )
+
+        # 4. Plain Text
         if self._is_plain_text(message):
             logger.info("New text message")
             text = self._extract_text(message) or None
@@ -283,7 +288,7 @@ class BaleClient:
                 text=text,
             )
 
-        logger.info("Received message type that was not recognized as text, photo, or video.")
+        logger.info("Received message type that was not recognized as plain text, photo, or video.")
 
         return NormalizedMessage(
             message_id=msg_id,
@@ -360,9 +365,37 @@ class BaleClient:
         return False
 
     @classmethod
+    def _has_unsupported_media(cls, message: Message) -> bool:
+        """
+        Check if message contains generic files/documents (PDF, ZIP, APK, DOCX),
+        stickers, voice notes, audio, polls, etc., which must be ignored.
+        """
+        docs = cls._find_documents_and_media(message)
+        for doc_obj, _, _ in docs:
+            mime = str(getattr(doc_obj, "mime_type", "") or getattr(doc_obj, "mimetype", "") or "").lower()
+            name = str(getattr(doc_obj, "file_name", "") or getattr(doc_obj, "name", "") or "").lower()
+
+            is_image = mime.startswith("image/") or name.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic"))
+            is_video = mime.startswith("video/") or name.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm"))
+
+            if not is_image and not is_video:
+                return True
+
+        # Check explicit unsupported media attributes
+        unsupported_attrs = ("sticker", "voice", "audio", "location", "contact", "poll", "gift")
+        for attr in unsupported_attrs:
+            if getattr(message, attr, None):
+                return True
+            content = getattr(message, "content", None)
+            if content and getattr(content, attr, None):
+                return True
+
+        return False
+
+    @classmethod
     def _is_plain_text(cls, message: Message) -> bool:
-        """Check if message is plain text without media attachments."""
-        if cls._is_photo(message) or cls._is_video(message):
+        """Check if message is plain text without any media/file attachments."""
+        if cls._is_photo(message) or cls._is_video(message) or cls._has_unsupported_media(message):
             return False
 
         text = cls._extract_text(message)
