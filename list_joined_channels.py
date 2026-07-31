@@ -27,10 +27,25 @@ async def main() -> None:
     client = Client(**client_kwargs)
 
     print("Connecting to Bale...")
-    if hasattr(client, "start") and callable(getattr(client, "start")):
-        await client.start()
-    elif hasattr(client, "connect") and callable(getattr(client, "connect")):
-        await client.connect()
+    
+    # Run client connection in a background task to prevent blocking the main loop
+    conn_task = asyncio.create_task(client.start())
+
+    # Wait briefly for connection to authorize
+    connected = False
+    for _ in range(10):
+        await asyncio.sleep(0.5)
+        try:
+            if hasattr(client, "get_me") and callable(getattr(client, "get_me")):
+                me = await client.get_me()
+                if me:
+                    connected = True
+                    break
+        except Exception:
+            pass
+
+    if not connected:
+        await asyncio.sleep(1)
 
     print("Connected successfully!\n")
 
@@ -40,19 +55,23 @@ async def main() -> None:
 
     dialogs = []
 
-    # Try available dialog retrieval methods in aiobale
-    dialog_method_names = ["get_dialogs", "get_chats", "get_user_dialogs", "get_peers", "fetch_dialogs"]
-    for method_name in dialog_method_names:
-        if hasattr(client, method_name) and callable(getattr(client, method_name)):
-            try:
-                method = getattr(client, method_name)
-                res = await method() if inspect.iscoroutinefunction(method) else method()
-                if res:
-                    dialogs = list(res)
-                    print(f"[+] Retrieved dialogs using client.{method_name}()\n")
-                    break
-            except Exception as e:
-                print(f"Notice: client.{method_name}() error: {e}")
+    # Check direct property
+    if hasattr(client, "dialogs") and getattr(client, "dialogs"):
+        dialogs = list(getattr(client, "dialogs"))
+
+    # Try available dialog retrieval methods
+    if not dialogs:
+        dialog_method_names = ["get_dialogs", "get_chats", "get_user_dialogs", "get_peers", "fetch_dialogs"]
+        for method_name in dialog_method_names:
+            if hasattr(client, method_name) and callable(getattr(client, method_name)):
+                try:
+                    method = getattr(client, method_name)
+                    res = await method() if inspect.iscoroutinefunction(method) else method()
+                    if res:
+                        dialogs = list(res)
+                        break
+                except Exception as e:
+                    print(f"Notice: client.{method_name}() error: {e}")
 
     if dialogs:
         count = 0
@@ -73,10 +92,15 @@ async def main() -> None:
 
     print("=" * 65)
 
-    if hasattr(client, "stop") and callable(getattr(client, "stop")):
-        await client.stop()
-    elif hasattr(client, "disconnect") and callable(getattr(client, "disconnect")):
-        await client.disconnect()
+    # Cancel background task and stop client
+    conn_task.cancel()
+    try:
+        if hasattr(client, "stop") and callable(getattr(client, "stop")):
+            await client.stop()
+        elif hasattr(client, "disconnect") and callable(getattr(client, "disconnect")):
+            await client.disconnect()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
