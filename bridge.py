@@ -33,7 +33,6 @@ class MessageBridge:
         self._processed_set: Set[Union[str, int]] = set()
         self._processed_queue: deque = deque()
 
-        # Buffer for grouping media into albums: key -> (peer_id, grouped_id)
         self._album_buffers: Dict[Tuple[str, Any], List[NormalizedMessage]] = {}
         self._album_tasks: Dict[Tuple[str, Any], asyncio.Task] = {}
 
@@ -77,6 +76,19 @@ class MessageBridge:
                     logger.info("Forwarded successfully")
             return
 
+        # Documents / Files -> send document message with filename and caption
+        if msg.msg_type == MessageType.DOCUMENT:
+            if msg.media_bytes:
+                tg_id = await self.telegram_client.send_document_message(
+                    document_bytes=msg.media_bytes,
+                    filename=msg.file_name,
+                    caption=msg.caption,
+                )
+                if tg_id:
+                    self._mark_processed(msg_id)
+                    logger.info("Forwarded successfully")
+            return
+
         # Photo or Video -> route through album aggregator buffer
         if msg.msg_type in (MessageType.PHOTO, MessageType.VIDEO):
             await self._buffer_media_item(msg)
@@ -96,7 +108,6 @@ class MessageBridge:
             msg.message_id, group_key, len(self._album_buffers[group_key])
         )
 
-        # Restart timer task for this group
         if group_key in self._album_tasks:
             self._album_tasks[group_key].cancel()
 
@@ -128,4 +139,4 @@ class MessageBridge:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error("Error flushing album group %s: %s", group_key, e, exc_info=True)
+            logger.error("Error flushing album group %s: %s", e, exc_info=True)

@@ -1,6 +1,6 @@
 """
 Telegram client wrapper using python-telegram-bot.
-Handles uploading text, photo, video, and album media groups to Telegram channel.
+Handles uploading text, photo, video, document files, and album media groups to Telegram channel.
 """
 
 import logging
@@ -111,6 +111,34 @@ class TelegramClient:
             logger.error("Telegram error uploading video: %s", e)
             return None
 
+    async def send_document_message(
+        self, document_bytes: bytes, filename: Optional[str] = None, caption: Optional[str] = None
+    ) -> Optional[int]:
+        """
+        Upload document/file bytes to Telegram channel with caption.
+
+        :param document_bytes: Raw file bytes
+        :param filename: Original filename
+        :param caption: File caption
+        :return: Telegram message ID if successful, None otherwise
+        """
+        if not document_bytes:
+            return None
+
+        formatted_caption = self._format_caption(caption)
+
+        try:
+            msg = await self.bot.send_document(
+                chat_id=self.channel_id,
+                document=document_bytes,
+                filename=filename or "file",
+                caption=formatted_caption,
+            )
+            return msg.message_id
+        except TelegramError as e:
+            logger.error("Telegram error uploading document: %s", e)
+            return None
+
     async def send_media_group_message(self, items: list[Any]) -> bool:
         """
         Send a list of photo/video items as a Telegram Media Group (Album).
@@ -127,11 +155,12 @@ class TelegramClient:
                 return bool(await self.send_photo_message(item.media_bytes, item.caption))
             elif item.msg_type.name == "VIDEO":
                 return bool(await self.send_video_message(item.media_bytes, item.caption))
+            elif item.msg_type.name == "DOCUMENT":
+                return bool(await self.send_document_message(item.media_bytes, item.file_name, item.caption))
             return False
 
         success_all = True
 
-        # Telegram limits media group size to 10 items
         for i in range(0, len(items), 10):
             chunk = items[i:i + 10]
             if len(chunk) == 1:
@@ -140,6 +169,8 @@ class TelegramClient:
                     res = await self.send_photo_message(item.media_bytes, item.caption)
                 elif item.msg_type.name == "VIDEO":
                     res = await self.send_video_message(item.media_bytes, item.caption)
+                elif item.msg_type.name == "DOCUMENT":
+                    res = await self.send_document_message(item.media_bytes, item.file_name, item.caption)
                 else:
                     res = None
                 if not res:
